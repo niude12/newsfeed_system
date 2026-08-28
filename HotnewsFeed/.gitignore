@@ -1,0 +1,5 @@
+# 登录会话属于敏感凭据，禁止提交版本库
+storage/*cookies*.txt
+
+# 视频处理临时文件
+storage/video_temp/

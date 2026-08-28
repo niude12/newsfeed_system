@@ -1,0 +1,14 @@
+# HotnewsFeed 依赖清单（在 conda 环境 news_feed 中验证通过）
+# 安装：conda activate news_feed && pip install -r requirements.txt
+python-a2a==0.5.4
+flask==3.1.1
+mcp<2
+langchain-openai==0.3.28
+openai==1.97.1
+requests==2.32.4
+pymysql>=1.1,<2
+redis>=5,<7
+pymilvus>=2.5,<3
+apscheduler>=3.10,<4
+yt-dlp>=2025.1
+imageio-ffmpeg>=0.5,<1

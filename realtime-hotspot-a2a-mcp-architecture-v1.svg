@@ -1,0 +1,227 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1125" viewBox="0 0 1800 1125">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#334155"/>
+    </marker>
+    <marker id="arrowA2A" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#ea580c"/>
+    </marker>
+    <marker id="arrowMCP" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#7c3aed"/>
+    </marker>
+    <marker id="arrowBlue" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#2563eb"/>
+    </marker>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.12"/>
+    </filter>
+    <linearGradient id="headerGrad" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#2563eb"/>
+      <stop offset="1" stop-color="#38bdf8"/>
+    </linearGradient>
+    <style>
+      .title { font:700 31px 'Microsoft YaHei','Noto Sans SC',sans-serif; fill:#0f172a; }
+      .subtitle { font:400 16px 'Microsoft YaHei','Noto Sans SC',sans-serif; fill:#64748b; }
+      .node { font:600 17px 'Microsoft YaHei','Noto Sans SC',sans-serif; fill:#172033; text-anchor:middle; dominant-baseline:middle; }
+      .small { font:500 14px 'Microsoft YaHei','Noto Sans SC',sans-serif; fill:#475569; text-anchor:middle; }
+      .tiny { font:500 12.5px 'Microsoft YaHei','Noto Sans SC',sans-serif; fill:#64748b; text-anchor:middle; }
+      .agent { fill:#f8fbff; stroke:#60a5fa; stroke-width:2.2; rx:8; filter:url(#shadow); }
+      .tool { fill:#ffffff; stroke:#475569; stroke-width:2; rx:18; }
+      .mcp { fill:#faf5ff; stroke:#8b5cf6; stroke-width:2.2; }
+      .registry { fill:#fff7ed; stroke:#f97316; stroke-width:2.2; }
+      .db { fill:#f0fdfa; stroke:#0f766e; stroke-width:2; }
+      .lane { fill:#ffffff; stroke:#dbeafe; stroke-width:1.5; rx:16; }
+      .flow { fill:none; stroke:#334155; stroke-width:2.1; marker-end:url(#arrow); }
+      .a2a { fill:none; stroke:#ea580c; stroke-width:2.5; marker-end:url(#arrowA2A); }
+      .a2aDash { fill:none; stroke:#ea580c; stroke-width:2.1; stroke-dasharray:7 6; marker-end:url(#arrowA2A); }
+      .mcpFlow { fill:none; stroke:#7c3aed; stroke-width:2.3; marker-end:url(#arrowMCP); }
+      .mainflow { fill:none; stroke:#2563eb; stroke-width:3; marker-end:url(#arrowBlue); }
+      .dash { fill:none; stroke:#64748b; stroke-width:1.9; stroke-dasharray:6 6; marker-end:url(#arrow); }
+    </style>
+  </defs>
+
+  <rect width="1800" height="1125" fill="#f6f8fc"/>
+  <rect width="1800" height="10" fill="url(#headerGrad)"/>
+  <path d="M0 10 H44 V44 H0 Z" fill="#38bdf8" opacity="0.9"/>
+  <path d="M1800 1125 H1756 V1081 H1800 Z" fill="#38bdf8" opacity="0.9"/>
+
+  <text x="70" y="63" class="title">实时热点资讯多智能体系统 · A2A + MCP 架构（V1 草图）</text>
+  <text x="72" y="91" class="subtitle">A2A 负责 Agent 发现、任务委派与结果传输；MCP 负责 Agent 调用资讯源、检索、数据与推送工具</text>
+
+  <!-- User entry -->
+  <rect x="675" y="112" width="360" height="58" rx="29" fill="#ffffff" stroke="#1e293b" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="855" y="141" class="node">用户热点查询 / 订阅配置 / 定时触发</text>
+  <path d="M855 170 V210" class="mainflow"/>
+
+  <!-- Coordinator -->
+  <polygon points="855,205 980,278 855,351 730,278" fill="#eff6ff" stroke="#2563eb" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="855" y="264" class="node">协调调度 Agent</text>
+  <text x="855" y="290" class="small">任务拆解 · 编排 · 状态汇总</text>
+
+  <!-- Follow-up loops -->
+  <path d="M730 278 C575 270 560 124 671 141" class="dash"/>
+  <text x="588" y="205" class="small">查询条件不明确则追问</text>
+  <path d="M980 278 C1122 270 1122 124 1039 141" class="dash"/>
+  <text x="1130" y="205" class="small">关键证据不足则补采</text>
+
+  <!-- A2A registry -->
+  <ellipse cx="1455" cy="265" rx="145" ry="54" class="registry" filter="url(#shadow)"/>
+  <text x="1455" y="250" class="node">A2A Agent Registry</text>
+  <text x="1455" y="278" class="small">Agent Card · 能力发现 · 健康检查</text>
+  <path d="M980 263 C1120 225 1235 225 1314 250" class="a2aDash"/>
+  <path d="M1315 280 C1195 320 1080 314 975 294" class="a2aDash"/>
+  <text x="1160" y="225" class="small" fill="#c2410c">发现 / 注册</text>
+
+  <!-- Service lanes -->
+  <rect x="35" y="408" width="322" height="520" class="lane"/>
+  <rect x="387" y="408" width="322" height="520" class="lane"/>
+  <rect x="739" y="408" width="322" height="520" class="lane"/>
+  <rect x="1091" y="408" width="322" height="520" class="lane"/>
+  <rect x="1443" y="408" width="322" height="520" class="lane"/>
+
+  <!-- A2A fanout from coordinator -->
+  <path d="M800 335 C660 370 410 368 196 426" class="a2a"/>
+  <text x="480" y="369" class="tiny" fill="#c2410c">A2A：采集任务</text>
+  <path d="M830 349 C745 380 635 385 548 426" class="a2a"/>
+  <text x="684" y="394" class="tiny" fill="#c2410c">A2A：聚类任务</text>
+  <path d="M855 351 V426" class="a2a"/>
+  <text x="916" y="392" class="tiny" fill="#c2410c">A2A：排行任务</text>
+  <path d="M880 349 C970 380 1080 385 1252 426" class="a2a"/>
+  <text x="1070" y="394" class="tiny" fill="#c2410c">A2A：核验任务</text>
+  <path d="M910 335 C1065 365 1360 368 1604 426" class="a2a"/>
+  <text x="1308" y="369" class="tiny" fill="#c2410c">A2A：简报任务</text>
+
+  <!-- Lane 1: collector -->
+  <rect x="68" y="426" width="256" height="62" class="agent"/>
+  <text x="196" y="457" class="node">实时资讯采集 Agent</text>
+  <path d="M196 488 V535" class="mcpFlow"/>
+  <text x="247" y="516" class="tiny" fill="#6d28d9">MCP 调用</text>
+  <ellipse cx="196" cy="567" rx="112" ry="32" class="mcp"/>
+  <text x="196" y="567" class="node">News MCP Server</text>
+  <path d="M196 599 V645" class="flow"/>
+  <rect x="80" y="645" width="232" height="78" class="tool"/>
+  <text x="196" y="672" class="node">多源资讯采集工具</text>
+  <text x="196" y="699" class="tiny">RSS · GNews · 热榜 API · HN</text>
+  <path d="M196 723 V762" class="flow"/>
+  <path d="M82 777 C82 759 310 759 310 777 V859 C310 877 82 877 82 859 Z" class="db"/>
+  <ellipse cx="196" cy="777" rx="114" ry="18" fill="#ccfbf1" stroke="#0f766e" stroke-width="2"/>
+  <text x="196" y="816" class="node">原始资讯库</text>
+  <text x="196" y="844" class="tiny">标题 · 来源 · 时间 · 正文 · URL</text>
+
+  <!-- Lane 2: cluster -->
+  <rect x="420" y="426" width="256" height="62" class="agent"/>
+  <text x="548" y="457" class="node">事件聚类 Agent</text>
+  <path d="M548 488 V535" class="mcpFlow"/>
+  <text x="599" y="516" class="tiny" fill="#6d28d9">MCP 调用</text>
+  <ellipse cx="548" cy="567" rx="112" ry="32" class="mcp"/>
+  <text x="548" y="567" class="node">Semantic MCP Server</text>
+  <path d="M548 599 V645" class="flow"/>
+  <rect x="432" y="645" width="232" height="78" class="tool"/>
+  <text x="548" y="672" class="node">去重与事件聚类工具</text>
+  <text x="548" y="699" class="tiny">规范化 · Embedding · 相似度聚类</text>
+  <path d="M548 723 V762" class="flow"/>
+  <path d="M434 777 C434 759 662 759 662 777 V859 C662 877 434 877 434 859 Z" class="db"/>
+  <ellipse cx="548" cy="777" rx="114" ry="18" fill="#ccfbf1" stroke="#0f766e" stroke-width="2"/>
+  <text x="548" y="816" class="node">事件聚类库 / pgvector</text>
+  <text x="548" y="844" class="tiny">Event · Article Cluster · Centroid</text>
+
+  <!-- Raw data to cluster -->
+  <path d="M310 818 C350 818 375 818 434 818" class="dash"/>
+  <text x="373" y="805" class="tiny">新增资讯</text>
+
+  <!-- Lane 3: heat ranking -->
+  <rect x="772" y="426" width="256" height="62" class="agent"/>
+  <text x="900" y="457" class="node">热点排序 Agent</text>
+  <path d="M900 488 V535" class="mcpFlow"/>
+  <text x="951" y="516" class="tiny" fill="#6d28d9">MCP 调用</text>
+  <ellipse cx="900" cy="567" rx="112" ry="32" class="mcp"/>
+  <text x="900" y="567" class="node">Trend MCP Server</text>
+  <path d="M900 599 V645" class="flow"/>
+  <rect x="784" y="645" width="232" height="78" class="tool"/>
+  <text x="900" y="672" class="node">热度评分工具</text>
+  <text x="900" y="699" class="tiny">来源数 · 时效衰减 · 讨论量 · 权重</text>
+  <path d="M900 723 V762" class="flow"/>
+  <path d="M786 777 C786 759 1014 759 1014 777 V859 C1014 877 786 877 786 859 Z" class="db"/>
+  <ellipse cx="900" cy="777" rx="114" ry="18" fill="#ccfbf1" stroke="#0f766e" stroke-width="2"/>
+  <text x="900" y="816" class="node">热点事件库</text>
+  <text x="900" y="844" class="tiny">Heat Score · 趋势 · 排名</text>
+
+  <!-- Cluster to heat -->
+  <path d="M662 818 C700 818 728 818 786 818" class="dash"/>
+  <text x="724" y="805" class="tiny">事件簇</text>
+
+  <!-- Lane 4: verification -->
+  <rect x="1124" y="426" width="256" height="62" class="agent"/>
+  <text x="1252" y="457" class="node">多源核验 Agent</text>
+  <path d="M1252 488 V535" class="mcpFlow"/>
+  <text x="1303" y="516" class="tiny" fill="#6d28d9">MCP 调用</text>
+  <ellipse cx="1252" cy="567" rx="112" ry="32" class="mcp"/>
+  <text x="1252" y="567" class="node">Search MCP Server</text>
+  <path d="M1252 599 V645" class="flow"/>
+  <rect x="1136" y="645" width="232" height="78" class="tool"/>
+  <text x="1252" y="672" class="node">交叉验证工具</text>
+  <text x="1252" y="699" class="tiny">Web Search · 来源评级 · 引用检查</text>
+  <path d="M1252 723 V762" class="flow"/>
+  <rect x="1136" y="765" width="232" height="98" class="tool"/>
+  <text x="1252" y="795" class="node">核验结果</text>
+  <text x="1252" y="823" class="tiny">可信 / 存疑 / 证据不足</text>
+  <text x="1252" y="847" class="tiny">来源链接 · 置信度 · 争议点</text>
+
+  <!-- Hot events to verification -->
+  <path d="M1014 818 C1055 818 1083 818 1136 818" class="dash"/>
+  <text x="1076" y="805" class="tiny">Top-N 热点</text>
+
+  <!-- Lane 5: briefing/push -->
+  <rect x="1476" y="426" width="256" height="62" class="agent"/>
+  <text x="1604" y="457" class="node">简报生成 Agent</text>
+  <path d="M1604 488 V535" class="mcpFlow"/>
+  <text x="1655" y="516" class="tiny" fill="#6d28d9">MCP 调用</text>
+  <ellipse cx="1604" cy="567" rx="112" ry="32" class="mcp"/>
+  <text x="1604" y="567" class="node">Publish MCP Server</text>
+  <path d="M1604 599 V645" class="flow"/>
+  <rect x="1488" y="645" width="232" height="78" class="tool"/>
+  <text x="1604" y="672" class="node">摘要与推送工具</text>
+  <text x="1604" y="699" class="tiny">飞书 · 邮件 · Webhook · Web UI</text>
+  <path d="M1604 723 V762" class="flow"/>
+  <rect x="1488" y="765" width="232" height="98" class="tool"/>
+  <text x="1604" y="795" class="node">热点简报</text>
+  <text x="1604" y="823" class="tiny">事件摘要 · 为什么重要</text>
+  <text x="1604" y="847" class="tiny">热度 · 可信度 · 原始来源</text>
+
+  <!-- Verification to briefing -->
+  <path d="M1368 818 C1408 818 1435 818 1488 818" class="dash"/>
+  <text x="1428" y="805" class="tiny">核验结论</text>
+
+  <!-- A2A artifacts returning to coordinator indication -->
+  <path d="M196 426 C330 366 640 350 790 327" class="a2aDash"/>
+  <path d="M548 426 C645 380 742 358 820 342" class="a2aDash"/>
+  <path d="M1252 426 C1095 367 1015 352 890 337" class="a2aDash"/>
+  <path d="M1604 426 C1375 356 1120 348 919 327" class="a2aDash"/>
+  <text x="1255" y="346" class="tiny" fill="#c2410c">A2A Artifact / Task Status 返回</text>
+
+  <!-- Bottom aggregation and user output -->
+  <path d="M900 877 C900 934 1020 950 1100 968" class="flow"/>
+  <path d="M1252 863 C1252 912 1238 942 1215 968" class="flow"/>
+  <path d="M1604 863 C1604 932 1415 949 1320 968" class="flow"/>
+  <rect x="1060" y="968" width="300" height="62" class="agent"/>
+  <text x="1210" y="988" class="node">输出优化 Agent</text>
+  <text x="1210" y="1015" class="tiny">去重 · 排序 · 引用 · 个性化呈现</text>
+
+  <path d="M1360 999 H1450" class="mainflow"/>
+  <rect x="1450" y="968" width="300" height="62" rx="31" fill="#ffffff" stroke="#1e293b" stroke-width="2.5" filter="url(#shadow)"/>
+  <text x="1600" y="999" class="node">向用户展示实时热点结果</text>
+
+  <!-- Legend -->
+  <rect x="50" y="966" width="310" height="117" rx="14" fill="#ffffff" stroke="#dbeafe" stroke-width="1.5"/>
+  <text x="90" y="995" class="small" text-anchor="start">图例</text>
+  <line x1="82" y1="1025" x2="130" y2="1025" stroke="#ea580c" stroke-width="3" marker-end="url(#arrowA2A)"/>
+  <text x="180" y="1030" class="tiny">A2A：Agent ↔ Agent</text>
+  <line x1="82" y1="1058" x2="130" y2="1058" stroke="#7c3aed" stroke-width="3" marker-end="url(#arrowMCP)"/>
+  <text x="190" y="1063" class="tiny">MCP：Agent → Tool</text>
+  <rect x="950" y="1058" width="20" height="20" class="agent"/>
+  <text x="1002" y="1073" class="tiny">Agent</text>
+  <ellipse cx="1070" cy="1068" rx="15" ry="10" class="mcp"/>
+  <text x="1118" y="1073" class="tiny">MCP Server</text>
+  <path d="M1210 1063 C1210 1055 1242 1055 1242 1063 V1075 C1242 1083 1210 1083 1210 1075 Z" class="db"/>
+  <text x="1280" y="1073" class="tiny">数据存储</text>
+</svg>
