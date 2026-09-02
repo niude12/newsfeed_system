@@ -3,3 +3,15 @@ storage/*cookies*.txt
 
 # 视频处理临时文件
 storage/video_temp/
+
+# Python 编译与测试缓存
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# 本地运行产物
+logs/*.log
+tmp/
+output/
+mcp_servers/output/
