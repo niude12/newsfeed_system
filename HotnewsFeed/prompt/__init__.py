@@ -1,2 +1,2 @@
 # -*- coding: utf-8 -*-
-"""提示词模板库：prompt/main_prompt.py 提供 HotnewsFeedPrompts（意图识别 / 结果润色 / 简报生成）"""
+"""Agent 规划提示词与加工/发布工具提示词。"""

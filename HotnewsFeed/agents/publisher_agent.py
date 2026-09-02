@@ -9,7 +9,7 @@
       1) optimize_output     去重 · 排序 · 引用 · 个性化呈现（共享出口）
       2) publish_briefing    生成热点简报（摘要 · 重要性 · 来源 · 可信度）并推送（飞书·邮件·Webhook·Web UI）
     由原 briefing / output_optimizer 两个 Agent 合并而来。
-    简报通常在任务完成后经 A2A 交接 + 用户确认调用（见 coordinator_agent.handoff_briefing）。
+    简报由用户明确请求或 Web 简报按钮触发。
 
     真实实现经 MCP 输出服务器调用 tools/publish.py（见 mcp_servers/mcp_publish_server.py）：
     Agent 方法 → mcp_servers.mcp_access.sync_call() → 官方 mcp 客户端 streamable-http
@@ -250,7 +250,7 @@ class PublisherAgent(A2AServer):
         task_type / params 放在 message.metadata.custom_fields 里（见 a2a.protocol.send_task）。
         按 task_type 分发：
           - optimize   结果优化呈现（optimize_output）；
-          - briefing   简报生成与推送（publish_briefing，协调器 handoff_briefing 即调用此任务）；
+          - briefing   简报生成与推送（publish_briefing）；
         未知任务类型或执行异常都记 ok=False + error。最后统一 encode_result 编码成
         {ok, result, error} JSON，经 reply_text 构造 AGENT 角色回传消息。
 
@@ -316,11 +316,9 @@ def create_publisher_agent():
 
 if __name__ == "__main__":
     # 启动输出 Agent 的 A2A 服务器（默认绑定 127.0.0.1:8003，与 AgentCard.url 及
-    # a2a.protocol._AGENT_ENDPOINTS["publisher"] 一致；协调器 handoff_briefing 即委派到此）。
+    # a2a.protocol._AGENT_ENDPOINTS["publisher"] 一致）。
     run_server(create_publisher_agent(), host="127.0.0.1", port=8003)   # 启动输出 Agent 的 A2A 服务器并阻塞监听。
     # # 业务方法直接调用：取一份热点结果 → 优化 → 生成简报并推送
-    # from agents.coordinator_agent import CoordinatorAgent
-    # result = CoordinatorAgent().run_hotspot("科技", top_n=3)
     # agent = create_publisher_agent()
     # optimized = agent.optimize_output(result)
     # pub = agent.publish_briefing(optimized, channels=["feishu", "web_ui"])

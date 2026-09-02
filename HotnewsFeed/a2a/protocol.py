@@ -10,7 +10,6 @@
   parse_task        从收到的消息里解析 (task_type, params, from_agent)
   delegate          向目标 Agent 委派任务（agent 名 → 真实 HTTP A2A；A2AServer 实例 → 同进程演示）
   reply_text        构造回传消息
-  ask_user_confirm  反问用户（简报交接的确认）
 
 注意：业务路由信息（task_type / params）放在 Message.metadata.custom_fields 里，
 它是 python_a2a 的通用扩展字段，随消息一起序列化，走 HTTP 也不会丢。
@@ -41,7 +40,6 @@
 对外暴露的接口（同时由 a2a/__init__.py 再导出）：
 - send_task / parse_task / reply_text : 消息构造与解析。
 - delegate                            : 委派任务（名字符串走 HTTP，A2AServer 实例走同进程）。
-- ask_user_confirm                    : 终端反问用户（简报交接确认，模拟实现）。
 - encode_result / _json_default       : 回传结果编码（dataclass → dict → JSON）。
 """
 
@@ -386,29 +384,3 @@ def delegate(target, task_type: str, params: Optional[Dict[str, Any]] = None,
     reply = target.handle_message(send_task(task_type, params, from_agent))
     # 回传正文：优先取 content.text（TextContent），否则退化为 str(reply.content)。
     return reply.content.text if hasattr(reply.content, "text") else str(reply.content)
-
-
-# ===== 反问用户 =====
-def ask_user_confirm(prompt: str) -> bool:
-    """反问用户（如“是否生成简报？”），返回用户确认结果（True 生成 / False 跳过）
-
-    参数:
-        prompt: 向用户展示的提问文本（会附加 "[y/N]: " 提示后缀）。
-
-    返回:
-        bool：True 表示用户确认（输入 y/yes/是）；False 表示放弃（其它输入）。
-
-    抛出:
-        不抛异常——输入流关闭（EOFError）时按「放弃」处理。
-
-    说明:
-        【模拟】真实实现：走前端 / IM 通道收集用户回复。
-        当前版本：终端 input() 交互，输入 y/yes/是 视为确认，其余视为放弃。
-    """
-    try:
-        # 读取终端输入：去掉首尾空白并转小写，统一大小写比较。
-        answer = input(f"{prompt} [y/N]: ").strip().lower()
-    except EOFError:
-        answer = ""  # 输入流被关闭（如管道结束）时视为放弃。
-    # 只有 y/yes/是 视为确认，其余（含回车、n、其它）一律当作放弃。
-    return answer in ("y", "yes", "是")

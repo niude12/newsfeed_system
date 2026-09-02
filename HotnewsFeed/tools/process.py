@@ -11,7 +11,7 @@
 - ``ChatOpenAI``                     : langchain_openai，配置来自 Config.llm（qwen-plus · dashscope 兼容）。
 - ``Config.embedding_model``         : config.ini [embedding] 的模型名（默认 text-embedding-v3），
                                       复用 [llm] 的 base_url/api_key 调 dashscope 兼容 /embeddings。
-- ``HotnewsFeedPrompts.verify_prompt()`` : prompt/main_prompt.py 的事件核验模板，判断每条事件可信度。
+- ``ToolPrompts.verify_prompt()`` : 加工工具使用的事件核验模板。
 - ``NewsItem`` / ``HotEvent``        : task_pipelines/schemas.py 的入参 / 输出模型。
 - ``EventCluster``                   : 本模块定义的事件簇 dataclass（聚类中间产物，写入事件聚类库 / pgvector）。
 
@@ -19,7 +19,7 @@
   1. 真实为主：
      - 聚类：调 dashscope 兼容接口的 /embeddings（模型见 config.ini [embedding]，默认
        text-embedding-v3，复用 [llm] 的 base_url/api_key）把标题向量化，余弦相似度贪婪聚类；
-     - 核验：LLM（qwen-plus）按 prompt/main_prompt.py verify_prompt 判断每条事件可信度。
+     - 核验：LLM（qwen-plus）按 tool_prompts.py 判断每条事件可信度。
   2. 优雅降级：
      - embedding 接口失败 → 降级为「TF 词频向量 + 余弦」继续聚类；
      - LLM 核验失败 → 降级为启发式规则（来源数 / 关联资讯数阈值）。
@@ -49,7 +49,7 @@ from langchain_openai import ChatOpenAI
 
 from config import Config
 from create_logger import logger
-from prompt.main_prompt import HotnewsFeedPrompts
+from prompt.tool_prompts import ToolPrompts
 from task_pipelines.schemas import HotEvent, NewsItem
 
 # ===== 全局配置与 LLM =====
@@ -471,7 +471,7 @@ async def verify_events(
              for e in events],
             ensure_ascii=False)
         # verify_prompt 模板 | llm 拼成 LangChain 链。
-        chain = HotnewsFeedPrompts.verify_prompt() | llm
+        chain = ToolPrompts.verify_prompt() | llm
         # asyncio.to_thread：LLM 调用是阻塞式的，丢到线程池避免阻塞事件循环。
         resp = await asyncio.to_thread(
             lambda: chain.invoke({"events": payload}).content.strip())

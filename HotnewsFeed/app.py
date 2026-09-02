@@ -11,15 +11,13 @@
     - HTTP API：/api/status、/api/chat、/api/direct、/api/offline、
       /api/monitor、/api/briefing；
     - 底层复用 main.py 的 format_result / query_offline_news 做展示与离线查询，
-      业务调用则经 CoordinatorAgent（首个业务请求才懒加载创建）。
+      自然语言经 CoordinatorAgent；明确按钮经 operations.py 确定性操作层。
 
 模块依赖:
 - ``Flask``            : Web 框架。app 是全局 Flask 实例；render_template_string
                          渲染内嵌的 PAGE 单页模板；jsonify 返回 JSON 响应。
-- ``CoordinatorAgent`` : agents/coordinator_agent.py。create_coordinator_agent()
-                         创建实例；route() 做自然语言意图识别并路由；
-                         run_hotspot / run_latest / run_account_follow /
-                         run_account_monitor_from_text 是其四大业务方法。
+- ``CoordinatorAgent`` : 仅负责自然语言自主规划循环。
+- ``operations``       : 功能直选与账户监控按钮的确定性操作层。
 - ``a2a.protocol.delegate`` : a2a/protocol.py。把简报任务经真实 HTTP A2A 委派
                          给 PublisherAgent（:8003）。
 - ``main.format_result / query_offline_news`` : 结果格式化与离线查询复用。
@@ -32,7 +30,7 @@
 
     浏览器前端 fetch('/api/chat')
       → api_chat() → _get_coordinator().route(message)   # CoordinatorAgent
-          → intent_agent 意图识别 → A2A 子 Agent → MCP 网关（降级进程内直调）
+          → Plan/Execute/Observe/Replan → A2A 专业 Agent → MCP
       → _pipeline_response(result) → jsonify（结构化 result + display 文本）
       → 前端展示
 
@@ -376,10 +374,7 @@ def api_chat():
     说明:
         - request.get_json(silent=True) 解析请求体 JSON，解析失败时返回 None，
           or {} 兜底成空字典。
-        - _get_coordinator().route(message) 是 CoordinatorAgent 的自然语言路由：
-          intent_agent 做 LLM 意图识别，再按意图走 run_hotspot / run_latest /
-          run_account_follow / run_account_monitor_from_text，最终经 A2A/MCP
-          拿到 PipelineResult。
+        - _get_coordinator().route(message) 进入唯一的自主 Agent Loop。
         - 用 _coordinator_lock 保护 route 调用，避免多个 Web 请求并发进同一个
           Agent 实例产生共享状态竞争。
     """
@@ -401,7 +396,7 @@ def api_chat():
 
 @app.post("/api/direct")
 def api_direct():
-    """功能直选入口：跳过 LLM 意图识别，但仍由 Coordinator A2A 调子 Agent。
+    """功能直选入口：经 operations.py 直接调用确定性流水线。
 
     请求体（JSON）:
         {"action": "hotspot"|"latest"|"account_follow",
@@ -412,9 +407,7 @@ def api_direct():
         200 + _pipeline_response(result)；400：action 非法时返回错误提示。
 
     说明:
-        - 这是“功能直选”面板使用的接口：用户在前端下拉框里选功能并填参数，
-          不经过 intent_agent，直接调用 Coordinator 的 run_hotspot / run_latest /
-          run_account_follow（这些方法内部仍是真实 HTTP A2A 委派子 Agent）。
+        - 这是“功能直选”面板使用的接口，不进入 Coordinator Agent Loop。
         - max(1, min(50, int(...))) 把 limit 夹在 [1, 50]，hours 夹到 >= 1，
           防止前端传越界值；int(payload.get("limit") or 10) 缺省用 10。
         - _keywords 把字符串 / 数组关键词规范成列表，None 表示不加过滤。
@@ -423,35 +416,33 @@ def api_direct():
     payload = request.get_json(silent=True) or {}
     # 取 action 字段（指定功能名）并去空白。
     action = str(payload.get("action") or "").strip()
-    # 取（或懒加载创建）Coordinator 实例。
-    agent = _get_coordinator()
-    with _coordinator_lock:
-        if action == "hotspot":
+    from operations import run_account_follow, run_hotspot, run_latest
+    if action == "hotspot":
             # 热点查询：模块 + topN + 时间窗口 + 可选关键词。
-            result = agent.run_hotspot(
+            result = run_hotspot(
                 module=str(payload.get("module") or "科技"),           # 模块名，缺省“科技”。
                 top_n=max(1, min(50, int(payload.get("limit") or 10))),  # topN 夹到 [1,50]，缺省 10。
                 time_window_hours=max(1, int(payload.get("hours") or 24)),  # 时间窗口小时，缺省 24。
                 keywords=_keywords(payload.get("keywords")),           # 关键词列表，None=不过滤。
             )
-        elif action == "latest":
+    elif action == "latest":
             # 最新新闻：模块 + 数量 + 可选关键词。
-            result = agent.run_latest(
+            result = run_latest(
                 module=str(payload.get("module") or "科技"),           # 模块名，缺省“科技”。
                 count=max(1, min(50, int(payload.get("limit") or 10))),  # 数量夹到 [1,50]，缺省 10。
                 keywords=_keywords(payload.get("keywords")),           # 关键词列表，None=不过滤。
             )
-        elif action == "account_follow":
+    elif action == "account_follow":
             # 一次性账户发布：账户名 + 平台 + 起始时间 + 数量。
-            result = agent.run_account_follow(
+            result = run_account_follow(
                 account=str(payload.get("account") or "").strip(),      # 账户名。
                 platform=str(payload.get("platform") or "bilibili").strip(),  # 平台，缺省 bilibili。
                 since=str(payload.get("since") or "").strip() or None,  # 起始时间，空串转 None。
                 limit=max(1, min(50, int(payload.get("limit") or 10))),  # 数量夹到 [1,50]，缺省 10。
             )
-        else:
+    else:
             # 未知功能名：返回 400 错误。
-            return jsonify({"ok": False, "error": f"未知直选功能: {action}"}), 400
+        return jsonify({"ok": False, "error": f"未知直选功能: {action}"}), 400
     return jsonify(_pipeline_response(result))
 
 
@@ -498,10 +489,8 @@ def api_monitor():
         200 + _pipeline_response(result)；400：参数缺失或动作非法时返回错误提示。
 
     说明:
-        - 本接口不实现监控业务，只是把前端的动作 + 参数拼成一句自然语言话术，
-          交给 _get_coordinator().run_account_monitor_from_text(text)：Coordinator
-          内部做槽位抽取（动作 / 账户 / 平台 / URL），再经真实 HTTP A2A 分发给
-          AccountMonitorAgent（:8009）执行。
+        - 本接口把结构化动作交给 operations.run_monitor，再经 A2A 分发给
+          AccountMonitorAgent（:8009），不经过自然语言解析。
         - action="add" 必须有 URL；action="stop" 必须有账户名。
         - 平台默认 "bilibili"（前端下拉框也主要是 B 站 / RSS）。
     """
@@ -517,27 +506,19 @@ def api_monitor():
         if not url:
             # 注册监控必须有主页 URL。
             return jsonify({"ok": False, "error": "注册监控必须提供账户主页 URL"}), 400
-        # 账户名可选；lstrip('@') 兼容用户可能手动多打了一个 @ 的情况。
-        account_text = f"@{account.lstrip('@')}" if account else ""
-        # 拼成“持续监控<平台>账户 <账户名> <URL>”的话术。
-        text = f"持续监控{platform}账户 {account_text} {url}".strip()
     elif action == "run":
-        # 立即检查全部已注册账户。
-        text = "立即执行账户监控"
+        pass
     elif action == "status":
-        # 查看监控状态和已发现数量。
-        text = "查看账户监控状态"
+        pass
     elif action == "stop":
         if not account:
             # 停止监控必须指定账户名。
             return jsonify({"ok": False, "error": "停止监控必须提供账户名"}), 400
-        text = f"停止监控 @{account.lstrip('@')} {platform}"
     else:
         # 未知动作：返回 400 错误。
         return jsonify({"ok": False, "error": f"未知监控动作: {action}"}), 400
-    # 把拼好的话术交给 Coordinator 的账户监控入口（内部 A2A 分发给 :8009）。
-    with _coordinator_lock:
-        result = _get_coordinator().run_account_monitor_from_text(text)
+    from operations import run_monitor
+    result = run_monitor(action, account=account, platform=platform, url=url)
     return jsonify(_pipeline_response(result))
 
 

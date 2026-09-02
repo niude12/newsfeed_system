@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 """对外服务主入口（main.py）—— 测试用对话循环
 
-在线：用户输入自然语言 → 协调调度 Agent（LLM 意图识别）
-  → 经 A2A 路由到功能 Agent → MCP 网关调用（不可达自动降级进程内直调）
-  → 结果格式化展示 → A2A 反问是否生成简报并推送（handoff_briefing）。
+在线自然语言：用户输入 → Coordinator Agent Loop → A2A 专业 Agent → MCP 工具。
+明确命令：斜杠命令 → operations.py 确定性操作层，不进入 Agent 推理。
 离线：`query_offline_news()` / `/offline` / “离线查询……”
   → Redis 精确缓存 → Milvus 向量检索 ID → MySQL 取原文（最多 3 条）。
 
@@ -16,10 +15,8 @@
     的业务调用（热点查询、最新新闻、账户发布、账户持续监控）。
 
 模块依赖:
-- ``CoordinatorAgent`` : agents/coordinator_agent.py 中的协调调度 Agent。
-  create_coordinator_agent() 创建实例；route() 做 LLM 意图识别并路由；
-  run_hotspot / run_latest / run_account_follow / run_account_monitor_from_text
-  是其四大业务方法；handoff_briefing() 在任务完成后反问是否生成简报。
+- ``CoordinatorAgent`` : 仅处理自然语言自主循环与 A2A dispatch。
+- ``operations``       : 快捷命令使用的确定性热点、最新、账户和监控操作。
 - ``mcp_access``        : mcp_servers/mcp_access.py。MCP_URLS 是四台 MCP 服务器
   的 streamable-http 端点；mcp_list_tools / sync_call 用于探测服务器连通性。
 - ``OfflineNewsService``: offline_news/service.py。query() 编排
@@ -31,12 +28,11 @@
 
     main() 对话循环
       ├─ 快捷命令 handle_command()
-      │     └─ agent.run_*() → format_result() 展示 → handoff_briefing()
+      │     └─ operations.run_*() → format_result()
       ├─ 离线话术 _extract_offline_query()
       │     └─ run_offline_query() → query_offline_news()
       │          └─ OfflineNewsService().query()   # Redis → Milvus → MySQL
-      └─ 自然语言 agent.route(raw)
-            └─ intent_agent 意图识别 → A2A 子 Agent → MCP 网关（降级进程内直调）
+      └─ 自然语言 agent.route(raw) → Agent Loop → A2A → MCP
 
 对外暴露的接口:
 - format_result        : 把 PipelineResult 格式化成控制台文本（app.py 复用）。
@@ -247,18 +243,11 @@ def _print_mcp_status(status: Dict[str, dict]) -> None:
 
 
 # ===== 任务执行 =====
-def run_task_result(agent, result) -> None:
-    """展示流水线结果；任务成功且有内容时 A2A 反问是否生成简报。
+def run_task_result(result) -> None:
+    """展示流水线结果与自主 Agent Trace。
 
     参数:
-        agent:  CoordinatorAgent 实例（见 agents/coordinator_agent.py），
-                其 handoff_briefing(result) 会反问用户“是否生成简报”。
         result: PipelineResult 实例（热点 / 最新 / 账户发布 / 账户监控等任务结果）。
-
-    说明:
-        只有同时满足“结果非空、无 error、有 items、任务类型属于
-        hotspot_query / latest_news / account_follow”时才触发简报反问。
-        account_monitor 不触发——监控是持续任务，不逐次生成简报。
     """
     # 先把流水线结果格式化打印到控制台。
     print(format_result(result))
@@ -269,15 +258,6 @@ def run_task_result(agent, result) -> None:
             print(f"{step.get('step_id')}. {step.get('agent')}.{step.get('skill')} "
                   f"→ {step.get('status')} ({step.get('duration_ms', 0)}ms)"
                   + (f" · {step.get('error')}" if step.get('error') else ""))
-    # 任务成功（无 error）且有真实内容（items 非空）才反问；监控类任务除外。
-    if (result and not getattr(result, "error", None)
-            and getattr(result, "items", None)
-            and getattr(result, "task_type", "") in
-            ("hotspot_query", "latest_news", "account_follow")):
-        # 先打印一个空行分隔，让下面的反问提示更醒目。
-        print()
-        # A2A 反问：“是否生成简报并推送？”确认后委派给 PublisherAgent（:8003）。
-        agent.handoff_briefing(result)
 
 
 # ===== 离线新闻对外接口 =====
@@ -394,15 +374,13 @@ _HELP = """用法：
 """
 
 
-def handle_command(agent, cmd: str) -> bool:
+def handle_command(cmd: str) -> bool:
     """处理快捷命令；识别并执行成功返回 True，否则 False（交给自然语言）。
 
     支持的快捷命令（首词，前面可带 /）：
       help/h、status、hotspot、latest、account、monitor（add|run|status|stop）、offline。
 
     参数:
-        agent: CoordinatorAgent 实例（agent.run_* 系列业务方法见
-               agents/coordinator_agent.py）。
         cmd:   用户输入的命令行（如 "/hotspot 科技 10"）。
 
     返回:
@@ -411,13 +389,13 @@ def handle_command(agent, cmd: str) -> bool:
     说明:
         - 参数解析策略：args[0] 有则用、没有则给内置默认值（模块默认“科技”、
           账户默认“@新京报”）；数字参数用 args[1].isdigit() 先校验再 int()。
-        - 账户监控统一走 agent.run_account_monitor_from_text(text)：把动作转成
-          一句话术，由 Coordinator 内部做槽位抽取 + A2A 分发给 AccountMonitorAgent。
+        - 账户监控使用结构化参数经 operations.run_monitor 分发给 AccountMonitorAgent。
     """
     # 按空白切分命令行：首词是命令名，其余是参数。
     parts = cmd.split()
     name = parts[0].lower().lstrip("/")   # 首词去掉 "/" 并转小写，作为命令名。
     args = parts[1:]                      # 其余参数列表。
+    from operations import run_account_follow, run_hotspot, run_latest, run_monitor
 
     if name in ("help", "h"):
         # help/h：直接打印帮助文本。
@@ -433,30 +411,30 @@ def handle_command(agent, cmd: str) -> bool:
         # 第二个参数是纯数字才转 int，否则用默认 10（防脏输入）。
         top_n = int(args[1]) if len(args) > 1 and args[1].isdigit() else 10
         # 调用 Coordinator 热点查询并展示结果。
-        run_task_result(agent, agent.run_hotspot(module, top_n))
+        run_task_result(run_hotspot(module, top_n))
         return True
     if name == "latest":
         # latest：直选最新新闻。模块缺省“科技”，数量缺省 10。
         module = args[0] if args else "科技"
         count = int(args[1]) if len(args) > 1 and args[1].isdigit() else 10
-        run_task_result(agent, agent.run_latest(module, count))
+        run_task_result(run_latest(module, count))
         return True
     if name == "account":
         # account：直选一次性账户发布。账户缺省 @新京报，平台缺省 weibo。
         account = args[0] if args else "@新京报"
         platform = args[1] if len(args) > 1 else "weibo"
         limit = int(args[2]) if len(args) > 2 and args[2].isdigit() else 10
-        run_task_result(agent, agent.run_account_follow(account, platform, limit=limit))
+        run_task_result(run_account_follow(account, platform, limit=limit))
         return True
     if name == "monitor":
         # monitor：账户持续监控。子动作缺省 status（查看状态）。
         action = args[0].lower() if args else "status"
         if action == "run":
             # 立即执行全部已注册账户的监控检查。
-            run_task_result(agent, agent.run_account_monitor_from_text("立即执行账户监控"))
+            run_task_result(run_monitor("run"))
         elif action == "status":
             # 查看已注册监控的状态和已发现数量。
-            run_task_result(agent, agent.run_account_monitor_from_text("查看账户监控状态"))
+            run_task_result(run_monitor("status"))
         elif action == "add":
             # 注册监控必须带账户主页 URL；账户名可选，缺省由 B 站 UID 生成。
             if len(args) < 2:
@@ -466,26 +444,14 @@ def handle_command(agent, cmd: str) -> bool:
             url = args[1]
             account = args[2] if len(args) > 2 else ""
             # 有账户名时补上 @ 前缀（兼容用户已带 @ 的情况）。
-            account_text = f"@{account.lstrip('@')}" if account else ""
-            # 拼成一句话术交给 Coordinator 的账户监控入口（内部 A2A 分发）。
-            run_task_result(
-                agent,
-                agent.run_account_monitor_from_text(
-                    f"持续监控B站账户 {account_text} {url}".strip()
-                ),
-            )
+            run_task_result(run_monitor("add", account=account, platform="bilibili", url=url))
         elif action == "stop":
             # 停止监控必须提供账户名；平台可选，默认 bilibili。
             if len(args) < 2:
                 print("用法：/monitor stop <账户名> [平台]")
                 return True
             platform = args[2] if len(args) > 2 else "bilibili"
-            run_task_result(
-                agent,
-                agent.run_account_monitor_from_text(
-                    f"停止监控 @{args[1].lstrip('@')} {platform}"
-                ),
-            )
+            run_task_result(run_monitor("stop", account=args[1], platform=platform))
         else:
             # 未知的 monitor 子动作：打印完整用法。
             print("用法：/monitor add|run|status|stop（输入 /help 查看完整格式）")
@@ -516,16 +482,13 @@ def main() -> None:
            UnicodeEncodeError）。
         2. 打印系统横幅，提示支持的输入方式。
         3. 探测四台 MCP 服务器连通性，未启动的提示“降级进程内直调”。
-        4. 创建 CoordinatorAgent（真实 LLM 意图识别）。
+        4. 创建 CoordinatorAgent（自主规划循环）。
         5. 进入 while 循环的 REPL：读一行输入，依次判断
            退出指令 → 快捷命令（handle_command）→ 离线话术（_extract_offline_query）
            → 自然语言（agent.route）。
 
     说明:
-        - agent.route(raw) 是协调调度 Agent 的入口（见 agents/coordinator_agent.py），
-          内部先做 LLM 意图识别（intent_agent），再按意图走 run_hotspot /
-          run_latest / run_account_follow / run_account_monitor_from_text，最后
-          经 A2A 分发到子 Agent 服务器、MCP 网关调用。
+        - agent.route(raw) 只进入自主 Agent Loop；明确命令进入 operations.py。
         - 所有业务调用都用 try/except 包裹，异常记 logger.error 并打印给用户，
           避免 REPL 循环因单次异常崩溃退出。
     """
@@ -592,7 +555,7 @@ def main() -> None:
         first = re.split(r"\s+", raw, maxsplit=1)[0].lower().lstrip("/")
         if first in ("help", "h", "status", "hotspot", "latest", "account", "monitor", "offline"):
             # 首词命中快捷命令集合就交给 handle_command；识别失败给“未知命令”提示。
-            if not handle_command(agent, raw):
+            if not handle_command(raw):
                 print(f"未知命令: {raw}（/help 查看）")
             continue
         # 离线查询话术（“从离线库查询…/离线查询…”）：命中则直接走离线链路。
@@ -613,7 +576,7 @@ def main() -> None:
         try:
             logger.info(f"[main] 收到对话: {raw}")
             result = agent.route(raw)
-            run_task_result(agent, result)
+            run_task_result(result)
         except Exception as exc:
             logger.error(f"[main] 处理对话失败: {exc}", exc_info=True)
             print(f"[处理失败] {exc}")

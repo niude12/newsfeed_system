@@ -3,7 +3,7 @@
 
 Agent 用类表示，统一直接继承官方包 python_a2a 的 A2AServer，
 每张标准 AgentCard（含 skill）声明在各自模块顶层：
-  - CoordinatorAgent  协调调度（意图识别 · 路由 · A2A 简报交接）
+  - CoordinatorAgent  自主规划 · A2A 委派 · 观察后重规划
   - CollectorAgent    采集（多源采集 · 账户监控）
   - ProcessorAgent    加工（聚类 · 热度 · 核验）
   - PublisherAgent    输出（优化呈现 · 简报推送）

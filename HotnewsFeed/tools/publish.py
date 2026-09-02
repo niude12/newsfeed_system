@@ -8,14 +8,14 @@
 并推送到飞书 webhook、通用 webhook、邮件 SMTP、本地 web_ui 等通道。
 
 模块依赖:
-- ``HotnewsFeedPrompts.briefing_prompt()`` : prompt/main_prompt.py 里的简报模板，拼成 LangChain 链。
+- ``ToolPrompts.briefing_prompt()`` : 发布工具使用的简报模板。
 - ``ChatOpenAI``                           : langchain_openai，配置来自 Config.llm（qwen-plus · dashscope 兼容）。
 - ``Config.publish``                       : config.ini [publish] 段的推送配置字典。
 - ``PipelineResult``                       : task_pipelines/schemas.py 的流水线统一返回结构。
 
 实现原则：
   1. 真实为主：
-     - 简报正文：LLM（qwen-plus）按 prompt/main_prompt.py briefing_prompt 生成；
+     - 简报正文：LLM（qwen-plus）按 tool_prompts.py 生成；
      - 推送：飞书 webhook / 通用 webhook / 邮件 SMTP 有配置就走真实推送（标准库）。
   2. 优雅降级：
      - LLM 生成失败 → 降级为手写 Markdown 简报；
@@ -50,7 +50,7 @@ from langchain_openai import ChatOpenAI
 
 from config import Config
 from create_logger import logger
-from prompt.main_prompt import HotnewsFeedPrompts
+from prompt.tool_prompts import ToolPrompts
 from task_pipelines.schemas import AccountPost, HotEvent, NewsItem, PipelineResult
 
 # ===== 全局配置与 LLM =====
@@ -156,7 +156,7 @@ def _generate_briefing(task_result: PipelineResult) -> str:
              "items": [item.__dict__ for item in (task_result.items or [])]},
             ensure_ascii=False, default=str)
         # briefing_prompt 模板 | llm 拼成 LangChain 链。
-        chain = HotnewsFeedPrompts.briefing_prompt() | llm
+        chain = ToolPrompts.briefing_prompt() | llm
         # invoke 返回的 content 可能是 None，需要转成字符串并去掉首尾空白。
         text = (chain.invoke({"task_result": payload}).content or "").strip()
         # LLM 正常返回非空文本则直接用。
