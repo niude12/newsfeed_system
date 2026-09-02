@@ -262,6 +262,13 @@ def run_task_result(agent, result) -> None:
     """
     # 先把流水线结果格式化打印到控制台。
     print(format_result(result))
+    trace = getattr(result, "trace", None) or []
+    if trace:
+        print("\n== Agent Trace ==")
+        for step in trace:
+            print(f"{step.get('step_id')}. {step.get('agent')}.{step.get('skill')} "
+                  f"→ {step.get('status')} ({step.get('duration_ms', 0)}ms)"
+                  + (f" · {step.get('error')}" if step.get('error') else ""))
     # 任务成功（无 error）且有真实内容（items 非空）才反问；监控类任务除外。
     if (result and not getattr(result, "error", None)
             and getattr(result, "items", None)

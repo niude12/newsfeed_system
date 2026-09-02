@@ -102,6 +102,7 @@ class PipelineResult:
     queried_at: str = ""                  # 本次执行时间（ISO 8601）
     elapsed_ms: int = 0                   # 执行耗时
     error: Optional[str] = None           # 失败时的错误信息（成功为 None）
+    trace: Optional[List[dict]] = None    # 自主 Agent 每步决策/执行轨迹；固定流程为 None
 
 
 def dto_from_dict(cls, d):

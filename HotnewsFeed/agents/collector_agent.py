@@ -90,6 +90,11 @@ agent_card = AgentCard(
     version="1.0.0",
     capabilities={"streaming": True, "memory": True},
     skills=[
+        AgentSkill(id="execute", name="execute",
+                   description="接收 objective/context，由采集 Agent 的 LLM 自主选择采集工具",
+                   tags=["agent-loop", "tool-selection"],
+                   examples=["自主选择新闻采集或账户发布拉取工具"],
+                   input_modes=["application/json"], output_modes=["application/json"]),
         AgentSkill(
             id="collect_news",
             name="collect_news",
@@ -227,7 +232,16 @@ class CollectorAgent(A2AServer):
         logger.info(f"[collector] 收到 A2A 消息: {task_type} from={from_agent}")
         try:
             # 按任务类型分发到对应的业务方法；成功时 ok=True、error=None。
-            if task_type == "collect_news":
+            if task_type == "execute":
+                from agents.runtime.specialist_loop import execute_specialist
+                from tools.registry import tool_descriptions
+                result = execute_specialist(
+                    params.get("objective", ""), params.get("context") or {},
+                    {"collect_news": self.collect_news, "fetch_account_posts": self.fetch_account_posts},
+                    tool_descriptions(["collect_news", "fetch_account_posts"]),
+                )
+                ok, error = True, None
+            elif task_type == "collect_news":
                 # 资讯采集：module 默认科技，limit 默认 50，关键词/来源/时间从 params 取。
                 result = self.collect_news(params.get("module", "科技"), params.get("keywords"),
                                            params.get("sources"), params.get("since"), params.get("limit", 50))
@@ -295,4 +309,3 @@ if __name__ == "__main__":
     # text = delegate(agent, task_type="collect_news",
     #                 params={"module": "财经", "limit": 2}, from_agent="coordinator")
     # print("回传:", text)
-

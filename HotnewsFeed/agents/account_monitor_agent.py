@@ -53,6 +53,11 @@ agent_card = AgentCard(
     version="1.0.0",                       # 版本号。
     capabilities={"streaming": False, "memory": True},  # 同步应答；监控任务即“记忆”载体。
     skills=[
+        AgentSkill(id="execute", name="execute",
+                   description="接收 objective/context，由账户监控 Agent 的 LLM 自主选择监控操作",
+                   tags=["agent-loop", "tool-selection"],
+                   examples=["注册、检查、查询状态或停止账户监控"],
+                   input_modes=["application/json"], output_modes=["application/json"]),
         AgentSkill(
             id="register_monitor",         # 技能 ID，也是 A2A 任务类型。
             name="register_monitor",
@@ -79,6 +84,13 @@ agent_card = AgentCard(
             tags=["account", "monitor", "status"],  # 技能标签便于发现。
             examples=['[{"account":"bilibili_312249633","post_count":10,"last_error":null}]'],  # 示例输出。
             input_modes=["application/json"], output_modes=["application/json"],  # JSON 入、JSON 出。
+        ),
+        AgentSkill(
+            id="stop_monitor", name="stop_monitor",
+            description="停止指定平台账户的持续监控",
+            tags=["account", "monitor", "stop"],
+            examples=["停止监控 bilibili_312249633"],
+            input_modes=["application/json"], output_modes=["application/json"],
         ),
     ],
 )
@@ -226,7 +238,18 @@ class AccountMonitorAgent(A2AServer):
         logger.info(f"[account-monitor-agent] 收到 A2A 消息: {task_type} from={from_agent}")
         try:
             # 按任务类型分发：注册 / 全量检查 / 状态查询 / 停止监控。
-            if task_type == "register_monitor":
+            if task_type == "execute":
+                from agents.runtime.specialist_loop import execute_specialist
+                result = execute_specialist(
+                    params.get("objective", ""), params.get("context") or {},
+                    {"register_monitor": self.register_monitor,
+                     "check_monitors": self.start_check_all,
+                     "monitor_status": self.service.status,
+                     "stop_monitor": self.service.stop_account},
+                    {"register_monitor": "注册持续监控账户", "check_monitors": "后台启动全部账户检查",
+                     "monitor_status": "查询账户监控状态", "stop_monitor": "停止指定账户监控"},
+                )
+            elif task_type == "register_monitor":
                 result = self.register_monitor(
                     params.get("account", ""), params.get("platform", "bilibili"),
                     params.get("url", ""), params.get("check_now", False),

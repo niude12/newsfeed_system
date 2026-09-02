@@ -133,6 +133,11 @@ agent_card = AgentCard(
     version="1.0.0",
     capabilities={"streaming": True, "memory": True},
     skills=[
+        AgentSkill(id="execute", name="execute",
+                   description="接收 objective/context，由输出 Agent 的 LLM 自主选择整理或简报工具",
+                   tags=["agent-loop", "tool-selection"],
+                   examples=["整理结果；用户明确要求时生成简报"],
+                   input_modes=["application/json"], output_modes=["application/json"]),
         AgentSkill(
             id="optimize",
             name="optimize_output",
@@ -261,7 +266,15 @@ class PublisherAgent(A2AServer):
         logger.info(f"[publisher] 收到 A2A 消息: {task_type} from={from_agent}")
         try:
             # 按任务类型分发到对应的业务方法；成功时 ok=True、error=None。
-            if task_type == "optimize":
+            if task_type == "execute":
+                from agents.runtime.specialist_loop import execute_specialist
+                result = execute_specialist(
+                    params.get("objective", ""), params.get("context") or {},
+                    {"optimize": self.optimize_output, "briefing": self.publish_briefing},
+                    {"optimize": "整理统一展示结果", "briefing": "生成并推送简报（有外部副作用）"},
+                )
+                ok, error = True, None
+            elif task_type == "optimize":
                 # 结果优化呈现：把上游 PipelineResult 还原后做去重/排序/引用。
                 result = self.optimize_output(params.get("result"))
                 ok, error = True, None

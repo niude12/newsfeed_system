@@ -221,6 +221,7 @@ class CoordinatorAgent(A2AServer):
     def __init__(self):
         """初始化协调调度 Agent：把模块级 agent_card 传给 A2AServer 基类注册能力。"""
         super().__init__(agent_card=agent_card)
+        self._agent_loop = None
 
     # ===== 意图路由 =====
     def route(self, intent: str) -> PipelineResult:
@@ -241,7 +242,19 @@ class CoordinatorAgent(A2AServer):
             PipelineResult：可能为 hotspot_query / latest_news / account_follow /
             account_monitor / follow_up 之一（task_type 字段标识）。
         """
-        # 打印收到的原始用户话术，作为路由链路的第一步日志。
+        # 自然语言入口优先使用自主 Agent 循环。旧固定工作流只作为可关闭的故障回退，
+        # 斜杠命令和功能直选仍直接调用 run_*，不受这里影响。
+        runtime_cfg = conf.agent_runtime
+        if runtime_cfg["enabled"]:
+            try:
+                return self._route_agentic(intent)
+            except Exception as exc:
+                logger.exception("[coordinator] 自主 Agent 运行时异常: %s", exc)
+                if not runtime_cfg["fallback_to_workflow"]:
+                    return PipelineResult(task_type="agent_run", items=[], error=str(exc))
+                logger.warning("[coordinator] 回退到原固定工作流")
+
+        # 打印收到的原始用户话术，作为固定回退链路的第一步日志。
         logger.info(f"[coordinator] 收到意图: {intent}")
         # 真实 LLM 意图识别：识别新闻查询、一次性账户查询、持续账户监控与 out_of_scope。
         # 返回 (intents, user_queries, follow_up_message)，提示词见 prompt/main_prompt.py。
@@ -279,6 +292,37 @@ class CoordinatorAgent(A2AServer):
         logger.warning(f"[coordinator] 意图未识别，按默认热点查询处理: {intent}")
         # 默认热点查询：只猜模块（默认科技），条数用 run_hotspot 的默认 top_n=10。
         return self.run_hotspot(module=self._guess_module(intent))
+
+    def _route_agentic(self, intent: str) -> PipelineResult:
+        """运行单步规划循环，并适配为现有 UI/CLI 使用的 PipelineResult。"""
+        from agents.runtime import CoordinatorLoop
+        from dataclasses import asdict
+
+        if self._agent_loop is None:
+            self._agent_loop = CoordinatorLoop(config=conf)
+        run = self._agent_loop.run(intent)
+        trace = [asdict(item) for item in run.trace] if conf.agent_runtime["show_trace"] else None
+        if run.status == "input_required":
+            return PipelineResult(task_type="follow_up", items=[], error=run.message, trace=trace,
+                                  elapsed_ms=run.elapsed_ms)
+        if run.status == "failed":
+            raise RuntimeError(run.error or "自主 Agent 执行失败")
+
+        output = run.output
+        if isinstance(output, dict) and "__agent_tool__" in output:
+            output = output.get("data")
+        raw_items = output if isinstance(output, list) else ([] if output is None else [output])
+        item_type = {
+            "hotspot_query": HotEvent,
+            "latest_news": NewsItem,
+            "account_follow": AccountPost,
+        }.get(run.task_type)
+        if item_type:
+            items = [dto_from_dict(item_type, item) for item in raw_items]
+        else:
+            items = raw_items
+        return PipelineResult(task_type=run.task_type, items=items, error=None,
+                              elapsed_ms=run.elapsed_ms, trace=trace)
 
     # ===== 槽位抽取（轻量：LLM 只识别意图，模块/账户/关键词等参数从话术里直接扫）=====
     def _guess_module(self, intent: str) -> str:

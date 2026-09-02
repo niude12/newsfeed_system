@@ -79,6 +79,11 @@ agent_card = AgentCard(
     version="1.0.0",
     capabilities={"streaming": True, "memory": True},
     skills=[
+        AgentSkill(id="execute", name="execute",
+                   description="接收 objective/context，由加工 Agent 的 LLM 自主选择加工工具",
+                   tags=["agent-loop", "tool-selection"],
+                   examples=["自主选择聚类、热度评分或可信度核验工具"],
+                   input_modes=["application/json"], output_modes=["application/json"]),
         AgentSkill(
             id="cluster_events",
             name="cluster_events",
@@ -249,7 +254,17 @@ class ProcessorAgent(A2AServer):
         logger.info(f"[processor] 收到 A2A 消息: {task_type} from={from_agent}")
         try:
             # 按任务类型分发到对应的业务方法；成功时 ok=True、error=None。
-            if task_type == "cluster_events":
+            if task_type == "execute":
+                from agents.runtime.specialist_loop import execute_specialist
+                from tools.registry import tool_descriptions
+                result = execute_specialist(
+                    params.get("objective", ""), params.get("context") or {},
+                    {"cluster_events": self.cluster_events, "score_heat": self.score_heat,
+                     "verify_events": self.verify_events},
+                    tool_descriptions(["cluster_events", "score_heat", "verify_events"]),
+                )
+                ok, error = True, None
+            elif task_type == "cluster_events":
                 # 事件聚类：news_items 默认空列表，threshold 默认 0.8。
                 result = self.cluster_events(params.get("news_items", []), params.get("threshold", 0.8))
                 ok, error = True, None

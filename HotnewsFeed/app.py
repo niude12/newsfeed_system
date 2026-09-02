@@ -172,6 +172,7 @@ def _pipeline_response(result: PipelineResult):
         # 透传 error：follow_up 追问 / 业务错误时前端 callApi 用 body.error 展示真实原因，
         # 而不是笼统的「请求失败」（此前该字段缺失，追问被吞成通用报错）。
         "error": result.error,
+        "trace": _jsonable(result.trace) if getattr(result, "trace", None) else [],
     }
 
 
@@ -695,7 +696,7 @@ function saveResult(body){lastResult=body.result||null;document.querySelectorAll
 function fail(el,e){el.classList.remove('loading');el.innerHTML='<span class="error">[请求失败] '+escapeHtml(e.message)+'</span>'}
 function escapeHtml(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 
-async function chat(){const out=$('chatOutput');busy(out,true);try{const body=await callApi('/api/chat',{message:$('chatInput').value});out.classList.remove('loading');out.textContent=body.display||JSON.stringify(body.result,null,2);saveResult(body)}catch(e){fail(out,e)}}
+async function chat(){const out=$('chatOutput');busy(out,true);try{const body=await callApi('/api/chat',{message:$('chatInput').value});out.classList.remove('loading');let text=body.display||JSON.stringify(body.result,null,2);if(body.trace&&body.trace.length){text+='\n\n== Agent Trace ==\n'+body.trace.map(x=>`${x.step_id}. ${x.agent}.${x.skill} → ${x.status} (${x.duration_ms}ms)${x.error?' · '+x.error:''}`).join('\n')}out.textContent=text;saveResult(body)}catch(e){fail(out,e)}}
 async function directRun(){const out=$('directOutput');busy(out,true);try{const body=await callApi('/api/direct',{action:$('directAction').value,module:$('directModule').value,limit:Number($('directLimit').value),hours:Number($('directHours').value),keywords:$('directKeywords').value,account:$('directAccount').value,platform:$('directPlatform').value});out.classList.remove('loading');out.textContent=body.display;saveResult(body)}catch(e){fail(out,e)}}
 async function offlineRun(){const holder=$('offlineOutput');holder.innerHTML='<pre class="output loading">查询中，请稍候……</pre>';try{const body=await callApi('/api/offline',{query:$('offlineInput').value,limit:3});const rows=body.result.items||[];holder.innerHTML=rows.length?rows.map((r,i)=>`<div class="offline-card"><b>${i+1}. [${escapeHtml(r.module)}] ${escapeHtml(r.title)}</b><div>${escapeHtml(r.source||'')} · ${escapeHtml(r.published_at||'时间未知')}</div>${r.url?`<a href="${escapeHtml(r.url)}" target="_blank">查看原文</a>`:''}<p>${escapeHtml((r.summary||r.content||'').slice(0,350))}</p></div>`).join(''):'<pre class="output">未检索到结果。</pre>'}catch(e){holder.innerHTML='<pre class="output"><span class="error">[查询失败] '+escapeHtml(e.message)+'</span></pre>'}}
 async function monitorRun(action){const out=$('monitorOutput');busy(out,true);try{const body=await callApi('/api/monitor',{action,url:$('monitorUrl').value,account:$('monitorAccount').value,platform:$('monitorPlatform').value});out.classList.remove('loading');out.textContent=body.display||JSON.stringify(body.result,null,2)}catch(e){fail(out,e)}}

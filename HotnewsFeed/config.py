@@ -397,6 +397,21 @@ class Config:
             "temp_dir": str(temp_dir.resolve()),                                                     # 视频临时目录（绝对路径）
         }
 
+    @property
+    def agent_runtime(self):
+        """自主 Agent 循环的开关、资源上限与兼容回退配置。"""
+        enabled = self.get("agent_runtime", "enabled", default="true")
+        fallback = self.get("agent_runtime", "fallback_to_workflow", default="true")
+        show_trace = self.get("agent_runtime", "show_trace", default="true")
+        return {
+            "enabled": enabled.lower() in ("1", "true", "yes", "on"),
+            "max_iterations": max(1, int(self.get("agent_runtime", "max_iterations", default="8"))),
+            "max_agent_calls": max(1, int(self.get("agent_runtime", "max_agent_calls", default="6"))),
+            "max_total_seconds": max(10, int(self.get("agent_runtime", "max_total_seconds", default="180"))),
+            "fallback_to_workflow": fallback.lower() in ("1", "true", "yes", "on"),
+            "show_trace": show_trace.lower() in ("1", "true", "yes", "on"),
+        }
+
 
 if __name__ == "__main__":
     # 自测：打印当前配置（不打印 api_key）

@@ -26,8 +26,8 @@
 - ``register_to``     : 把一组工具定义注册到 FastMCP 服务器实例。
 """
 
-from dataclasses import dataclass
-from typing import Any, Callable, List
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List
 
 from tools.collect import collect_news, fetch_account_posts
 from tools.process import cluster_events, score_heat, verify_events
@@ -51,6 +51,14 @@ class ToolDefinition:
     name: str                        # MCP 工具名（客户端调用名）
     description: str                 # 工具描述（Agent 判断何时调用）
     handler: Callable[..., Any]      # 底层工具函数（入参/返回由函数注解决定）
+    input_schema: Dict[str, Any] = field(default_factory=dict)
+    output_schema: str = "Any"
+    side_effect: str = "read"
+    requires_confirmation: bool = False
+    idempotent: bool = True
+    timeout_seconds: int = 30
+    max_retries: int = 0
+    tags: List[str] = field(default_factory=list)
 
 
 # ===== 采集类工具（mcp_collect_server :8004）=====
@@ -94,6 +102,8 @@ PUBLISH_TOOLS: List[ToolDefinition] = [
         name="publish_briefing",
         description="根据任务结果生成热点简报并推送到指定通道（飞书·邮件·Webhook·Web UI）",
         handler=publish_briefing,
+        side_effect="external_write", requires_confirmation=True,
+        idempotent=False, timeout_seconds=60, tags=["publish"],
     ),
 ]
 
@@ -103,6 +113,8 @@ VIDEO_TOOLS: List[ToolDefinition] = [
         name="extract_video_content",
         description="提取 B 站视频元数据和字幕；无字幕时提取音频转写，再生成摘要和关键词",
         handler=extract_video_content,
+        side_effect="long_running", timeout_seconds=300,
+        tags=["video", "subtitle", "asr"],
     ),
 ]
 
@@ -126,3 +138,10 @@ def register_to(server, tool_defs: List[ToolDefinition]) -> None:
     for td in tool_defs:
         # server.tool(...) 返回装饰器，立刻用 td.handler 调用它完成注册。
         server.tool(name=td.name, description=td.description)(td.handler)
+
+
+def tool_descriptions(names: List[str]) -> Dict[str, str]:
+    """从唯一工具注册中心读取给 Agent 的工具说明。"""
+    wanted = set(names)
+    all_tools = COLLECT_TOOLS + PROCESS_TOOLS + PUBLISH_TOOLS + VIDEO_TOOLS
+    return {tool.name: tool.description for tool in all_tools if tool.name in wanted}
