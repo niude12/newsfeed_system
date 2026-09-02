@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""agents 包：核心数据流 Agent + 视频内容 Agent。
+"""agents 包：核心 Agent 集合（数据流 · 账户监控）。
 
 Agent 用类表示，统一直接继承官方包 python_a2a 的 A2AServer，
 每张标准 AgentCard（含 skill）声明在各自模块顶层：
@@ -7,7 +7,6 @@ Agent 用类表示，统一直接继承官方包 python_a2a 的 A2AServer，
   - CollectorAgent    采集（多源采集 · 账户监控）
   - ProcessorAgent    加工（聚类 · 热度 · 核验）
   - PublisherAgent    输出（优化呈现 · 简报推送）
-  - VideoAgent        视频（字幕 · ASR · 摘要）
   - AccountMonitorAgent 账户持续监控（注册 · 增量检查 · 入库通知）
 
 惰性加载：用模块级 __getattr__ 按需导入，避免 import agents 时把所有子模块
@@ -19,7 +18,6 @@ _LAZY = {
     "CollectorAgent": "agents.collector_agent",
     "ProcessorAgent": "agents.processor_agent",
     "PublisherAgent": "agents.publisher_agent",
-    "VideoAgent": "agents.video_agent",
     "AccountMonitorAgent": "agents.account_monitor_agent",
 }
 

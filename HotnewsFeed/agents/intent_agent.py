@@ -14,14 +14,35 @@
     提示词模板见 prompt/main_prompt.py 的 HotnewsFeedPrompts.intent_prompt()，
     输出 JSON 结构（intents / user_queries / follow_up_message）与协调调度 Agent 的 task_type 对齐。
 
-    用法：
-        from agents.intent_agent import intent_agent
-        intents, user_queries, follow_up_message = intent_agent("帮我查一下科技模块的热点新闻")
+模块依赖:
+- ``langchain_core.prompts`` : ChatPromptTemplate，LangChain 提示词模板类（from_template 建模板）。
+- ``langchain_openai``       : ChatOpenAI，OpenAI 兼容接口调用通义千问（qwen-plus，见 config.ini [llm]）。
+- ``Config``                 : 全局配置单例（config.ini）。conf.llm 提供 LLM 参数，conf.temperature 提供采样温度。
+- ``prompt.main_prompt``     : HotnewsFeedPrompts 提示词模板库。intent_prompt() 返回意图识别模板。
+- ``create_logger``          : 项目统一日志器。
 
-    演示：
-        python -m agents.intent_agent    # 跑一段真实 LLM 意图识别（需 config.ini 里的 api_key 有效）
+典型调用链::
+
+    CoordinatorAgent.route(intent)
+      → intent_agent(user_input)                        # 本模块对外函数
+      → HotnewsFeedPrompts.intent_prompt() | llm        # LangChain 链：模板 + ChatOpenAI
+      → chain.invoke({conversation_history, query, current_date}).content
+      → re.sub 去掉 ```json 代码块包裹
+      → json.loads 解析成 dict → 提取 intents / user_queries / follow_up_message
+      → 返回给协调器做任务路由
+
+对外暴露的接口：
+- intent_agent : 唯一对外函数。输入用户话术，返回 (intents, user_queries, follow_up_message)。
+
+用法：
+    from agents.intent_agent import intent_agent
+    intents, user_queries, follow_up_message = intent_agent("帮我查一下科技模块的热点新闻")
+
+演示：
+    python -m agents.intent_agent    # 跑一段真实 LLM 意图识别（需 config.ini 里的 api_key 有效）
 """
 
+# json：解析 LLM 返回的意图 JSON；re：清理 LLM 输出的 Markdown 代码块；datetime：取当前日期。
 import json
 import re
 from datetime import datetime
@@ -56,13 +77,31 @@ def intent_agent(user_input):
     """
     用法：识别用户输入的意图。把「用户的话 + 最近对话」喂给 LLM，让它输出 JSON 意图。
 
+    链路：
+      HotnewsFeedPrompts.intent_prompt()（LangChain 模板）
+      → | llm（ChatOpenAI）串成链
+      → chain.invoke({conversation_history, query, current_date}) 调用 LLM
+      → re.sub 去掉 Markdown 代码块包裹 → json.loads 解析成 dict → .get 取三字段
+
     参数:
-        user_input: 用户本轮输入的问题字符串
+        user_input: 用户本轮输入的问题字符串。
+
     返回:
         (intents, user_queries, follow_up_message) 三个值：
-          intents              意图列表，如 ['hotspot_query']
-          user_queries         每个意图改写后的明确问题，如 {"hotspot_query": "查询科技模块当前热点新闻"}
-          follow_up_message    追问消息（有歧义时非空，直接返回给用户）
+          intents              意图列表，如 ['hotspot_query']（可能同时命中多个意图）；
+          user_queries         每个意图改写后的明确问题，如 {"hotspot_query": "查询科技模块当前热点新闻"}；
+          follow_up_message    追问消息（有歧义或 out_of_scope 时非空，协调器会直接返回给用户）。
+
+    抛出:
+        json.JSONDecodeError: LLM 输出不是合法 JSON 时抛出（LLM 偶发不守格式，上层需兜底）。
+
+    说明:
+        - ``HotnewsFeedPrompts.intent_prompt()`` 是 prompt/main_prompt.py 里的静态方法，
+          返回一个 ChatPromptTemplate（占位符 {current_date} / {conversation_history} / {query}）。
+        - ``| llm`` 是 LangChain 的管道符：把模板和 LLM 串成可调用的链，invoke 填占位符后执行。
+        - ``re.sub(r'^```json\\s*|\\s*```$', '', ...)`` 去掉 LLM 常输出的 Markdown 代码块
+          （```json ... ```），避免 json.loads 解析失败。
+        - ``conversation_history`` 只取最近 6 行对话，防止多轮上下文超出模型输入长度。
     """
 
     # ===== 创建意图识别链：提示模板 + LLM =====
@@ -89,6 +128,7 @@ def intent_agent(user_input):
 
     # ===== 解析成字典 =====
     # json.loads(字符串)：把 JSON 字符串解析成 Python 字典。
+    # 注意：若 LLM 仍输出非 JSON（清理后仍不合规），这里会抛 JSONDecodeError，由上层兜底。
     # LLM 输出的 JSON 结构是（见 prompt/main_prompt.py 的 HotnewsFeedPrompts.intent_prompt）：
     # {"intents": ["intent1", "intent2"], "user_queries": {"intent1": "user_query1", ...}, "follow_up_message": "追问消息"}
     intent_output = json.loads(intent_response)
@@ -100,13 +140,14 @@ def intent_agent(user_input):
     follow_up_message = intent_output.get("follow_up_message", "")  # 追问消息
     logger.info(f"intents: {intents}||user_queries: {user_queries}||follow_up_message: {follow_up_message}")
 
+    # 返回三元组，供协调器做任务路由；follow_up_message 非空时协调器会直接回给用户。
     return intents, user_queries, follow_up_message
 
 
 if __name__ == "__main__":
     # 真实 LLM 意图识别演示（需 config.ini 里的 api_key 有效）
     demo = "帮我查一下科技模块的热点新闻"
-    intents, user_queries, follow_up_message = intent_agent(demo)
+    intents, user_queries, follow_up_message = intent_agent(demo)   # 调用意图识别（真实 LLM）。
     print(f"\n用户输入: {demo}")
     print(f"intents: {intents}")
     print(f"user_queries: {user_queries}")
@@ -114,7 +155,7 @@ if __name__ == "__main__":
 
     # 再试一个「关注账户」的意图
     demo2 = "关注 @新京报 的微博新发布"
-    intents2, user_queries2, follow_up_message2 = intent_agent(demo2)
+    intents2, user_queries2, follow_up_message2 = intent_agent(demo2)   # 第二次调用，验证账户关注类意图。
     print(f"\n用户输入: {demo2}")
     print(f"intents: {intents2}")
     print(f"user_queries: {user_queries2}")

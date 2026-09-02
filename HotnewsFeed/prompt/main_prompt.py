@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
+"""主控 / 协调调度 Agent 的提示词模板库（main_prompt.py）。
+
 文件名: main_prompt.py
 项目: HotnewsFeed
 
@@ -14,11 +15,28 @@
         5. briefing_prompt()            简报生成：把任务结果生成一份简报（摘要 · 重要性 · 来源 · 可信度）
         6. verify_prompt()              事件核验：加工 Agent 把事件列表喂给 LLM，判断每条可信度（可信/存疑/证据不足）
 
+模块依赖:
+- ``langchain_core.prompts.ChatPromptTemplate`` : LangChain 的提示词模板类。
+    from_template("...") 创建一个模板；花括号 {xxx} 是占位符，调用时用
+    chain.invoke({"xxx": 值}) 填进去。模板内需要输出字面花括号（JSON）时必须
+    写双花括号 {{ }}（str.format 转义），因此模板里的示例 JSON 都是 {{"intents"...}}。
+
+典型调用链::
+
+    agents/intent_agent.py  ->  HotnewsFeedPrompts.intent_prompt()        # 意图识别
+    tools/process.py        ->  HotnewsFeedPrompts.verify_prompt()        # 事件核验
+    tools/publish.py        ->  HotnewsFeedPrompts.briefing_prompt()      # 简报生成
+    agents/coordinator_agent.py ->  summarize_*_prompt()                   # 结果润色
+
     用法（在 agents/intent_agent.py / coordinator_agent.py 里）：
         from prompt.main_prompt import HotnewsFeedPrompts
         prompt = HotnewsFeedPrompts.intent_prompt()          # 拿到模板对象
         chain = prompt | llm                                  # 拼成链
         result = chain.invoke({...}).content                  # 填占位符并调用
+
+对外暴露：
+- ``HotnewsFeedPrompts`` : 提示词模板库类，全部方法都是 @staticmethod，
+                          直接 HotnewsFeedPrompts.xxx_prompt() 拿到模板。
 
     启动：本文件不单独启动，是被 intent_agent / coordinator 等 import 使用的。
 """
@@ -30,9 +48,12 @@ from langchain_core.prompts import ChatPromptTemplate
 
 # ===== 提示词模板库类 =====
 class HotnewsFeedPrompts:
-    """
-    提示词模板库：全部方法都是 @staticmethod（静态方法），
-    不需要创建对象，直接 HotnewsFeedPrompts.intent_prompt() 就能拿到模板。
+    """提示词模板库：集中管理协调调度 / 加工 / 输出环节的全部提示词。
+
+    全部方法都是 @staticmethod（静态方法），不需要创建对象，
+    直接 HotnewsFeedPrompts.intent_prompt() 就能拿到模板。
+    每个方法返回一个 langchain_core.prompts 的 ChatPromptTemplate 对象，
+    调用方用 ``模板 | llm`` 拼链、``chain.invoke({...})`` 填占位符并调用。
     """
 
     # ===== 模板1：意图识别 =====
@@ -53,8 +74,13 @@ class HotnewsFeedPrompts:
         返回:
             一个 ChatPromptTemplate 模板对象，占位符有：
               {current_date} {conversation_history} {query}
+
+        说明:
+            ChatPromptTemplate.from_template(...) 里 {xxx} 是占位符，invoke 时按字典填值；
+            模板需要让 LLM 输出字面花括号 JSON，因此示例全部写成 {{ }}（str.format 转义）。
+            返回对象可直接用 ``| llm`` 拼链，见 agents/intent_agent.py。
         """
-        return ChatPromptTemplate.from_template(
+        return ChatPromptTemplate.from_template(  # 创建「意图识别」模板：下面这段系统提示词即模板内容，占位符 {current_date} {conversation_history} {query}
 """
 系统提示：
 角色：您是一个专业的实时热点资讯助手，负责意图识别。
@@ -93,8 +119,12 @@ class HotnewsFeedPrompts:
         """
         用法：拿到「热点结果润色」模板。热点 Agent 返回的原始 JSON 通常很生硬，
         主控把它 + 用户原始问题 再喂给 LLM 一次，得到一段资讯播报式的回答。
+
+        返回:
+            一个 ChatPromptTemplate 模板对象，占位符有：
+              {query} {raw_response}
         """
-        return ChatPromptTemplate.from_template(
+        return ChatPromptTemplate.from_template(  # 创建「热点结果润色」模板，占位符 {query} {raw_response}
 """
 系统提示：您是一位专业的资讯编辑，以简洁、准确的风格总结热点新闻。基于查询和结果：
 - 核心描述点：事件标题、热度分、来源数、可信度、关联资讯数。
@@ -113,8 +143,12 @@ class HotnewsFeedPrompts:
         """
         用法：拿到「最新新闻结果润色」模板。把最新新闻 Agent 返回的原始 JSON
         整理成按时间倒序、一目了然的回答。
+
+        返回:
+            一个 ChatPromptTemplate 模板对象，占位符有：
+              {query} {raw_response}
         """
-        return ChatPromptTemplate.from_template(
+        return ChatPromptTemplate.from_template(  # 创建「最新新闻结果润色」模板，占位符 {query} {raw_response}
 """
 系统提示：您是一位专业的资讯编辑，以简洁、准确的风格总结最新新闻。基于查询和结果：
 - 核心描述点：标题、来源、发布时间。
@@ -133,8 +167,12 @@ class HotnewsFeedPrompts:
         """
         用法：拿到「账户发布结果润色」模板。把账户发布监控 Agent 返回的原始 JSON
         整理成「关注了谁的什么新发布」的回答。
+
+        返回:
+            一个 ChatPromptTemplate 模板对象，占位符有：
+              {query} {raw_response}
         """
-        return ChatPromptTemplate.from_template(
+        return ChatPromptTemplate.from_template(  # 创建「账户发布结果润色」模板，占位符 {query} {raw_response}
 """
 系统提示：您是一位专业的资讯编辑，以简洁、准确的风格总结账户发布。基于查询和结果：
 - 核心描述点：账户名、平台、发布标题、发布时间。
@@ -153,8 +191,12 @@ class HotnewsFeedPrompts:
         """
         用法：拿到「简报生成」模板。任务完成后，协调器反问用户是否生成简报，
         确认后 publisher 把任务结果喂给 LLM 生成简报（摘要 · 重要性 · 来源 · 可信度）。
+
+        返回:
+            一个 ChatPromptTemplate 模板对象，占位符有：
+              {task_result}
         """
-        return ChatPromptTemplate.from_template(
+        return ChatPromptTemplate.from_template(  # 创建「简报生成」模板，占位符 {task_result}
 """
 系统提示：您是一位资深资讯主编，负责把热点资讯结果整理成一份正式简报。规则：
 - 简报结构：标题、日期、要点列表（事件标题 + 热度 + 可信度 + 来源）、一句总结。
@@ -171,8 +213,12 @@ class HotnewsFeedPrompts:
         """
         用法：拿到「事件核验」模板。加工 Agent（tools/process.py verify_events）把事件列表
         喂给 LLM，让它对每条事件判断可信度（可信 / 存疑 / 证据不足）。
+
+        返回:
+            一个 ChatPromptTemplate 模板对象，占位符有：
+              {events}
         """
-        return ChatPromptTemplate.from_template(
+        return ChatPromptTemplate.from_template(  # 创建「事件核验」模板，占位符 {events}
 """
 系统提示：您是一位资深新闻核验编辑，负责对热点事件做多源交叉验证。规则：
 - 对每条事件，综合「关联资讯数、来源数与来源多样性、标题是否像重大事实性陈述」判断可信度。
@@ -190,4 +236,4 @@ class HotnewsFeedPrompts:
 if __name__ == '__main__':
     # 直接运行本文件时：打印出意图识别模板看看长什么样
     # ChatPromptTemplate 对象的 __str__ 会显示模板内容
-    print(HotnewsFeedPrompts.intent_prompt())
+    print(HotnewsFeedPrompts.intent_prompt())  # 直接打印模板文本，验证模板内容

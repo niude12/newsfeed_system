@@ -1,14 +1,29 @@
 # -*- coding: utf-8 -*-
 """工具注册中心（tools/registry.py）
 
-把 tools 包里的工具函数注册为「MCP 工具定义」，按三个 MCP 服务器分组：
-  - COLLECT_TOOLS  → mcp_collect_server（:8004）采集类
-  - PROCESS_TOOLS  → mcp_process_server（:8005）加工类
-  - PUBLISH_TOOLS  → mcp_publish_server（:8006）输出类
-  - VIDEO_TOOLS    → mcp_video_server（:8007）视频内容提取
+该模块是 tools 包的「对外注册出口」：把各工具模块里 MCP 无关的纯函数，
+包装成带元信息（name / description / handler）的 :class:`ToolDefinition`，
+再按四个 MCP 服务器分组导出，供 mcp_servers/ 里的服务器文件挂载。
 
-MCP 服务器文件通过 register_to() 把对应分组挂到 FastMCP 上；
-工具函数本身保持 mcp 无关，可被流水线 / 前端直接调用。
+模块依赖:
+- ``tools/collect.py``   采集类：collect_news（多源资讯采集）、fetch_account_posts（账户发布监控）。
+- ``tools/process.py``   加工类：cluster_events（事件聚类）、score_heat（热度评分）、
+                         verify_events（多源交叉验证）。
+- ``tools/publish.py``   输出类：publish_briefing（简报生成与推送）。
+- ``tools/video.py``     视频类：extract_video_content（B 站视频内容提取）。
+
+典型调用链::
+
+    mcp_servers/mcp_*_server.py
+        ->  from tools.registry import COLLECT_TOOLS / PROCESS_TOOLS / PUBLISH_TOOLS / VIDEO_TOOLS
+        ->  register_to(server, 对应分组)      # 把工具定义挂到 FastMCP 实例上
+        ->  MCP 客户端按 name 调用工具，底层实际执行 handler
+
+对外暴露的接口：
+- ``ToolDefinition``  : MCP 工具定义的数据结构（dataclass）。
+- ``COLLECT_TOOLS`` / ``PROCESS_TOOLS`` / ``PUBLISH_TOOLS`` / ``VIDEO_TOOLS``
+                      : 四组工具定义列表，分别对应 :8004 / :8005 / :8006 / :8007 四个 MCP 服务器。
+- ``register_to``     : 把一组工具定义注册到 FastMCP 服务器实例。
 """
 
 from dataclasses import dataclass
@@ -22,13 +37,25 @@ from tools.video import extract_video_content
 
 @dataclass
 class ToolDefinition:
-    """MCP 工具定义（注册所需的元信息）"""
+    """MCP 工具定义（注册所需的元信息）。
+
+    一个 ToolDefinition 描述「一个可被 MCP 客户端调用的工具」：
+    name 是客户端调用名，description 是给 Agent 看的「何时该调用它」的说明，
+    handler 是真正的底层 Python 函数（入参 / 返回值由该函数的类型注解与 docstring 决定）。
+
+    参数:
+        name:        MCP 工具名（客户端通过这个名字调用）。
+        description: 工具描述（Agent 依据它判断何时调用）。
+        handler:     底层工具函数（可被流水线 / 前端直接调用，保持 MCP 无关）。
+    """
     name: str                        # MCP 工具名（客户端调用名）
     description: str                 # 工具描述（Agent 判断何时调用）
     handler: Callable[..., Any]      # 底层工具函数（入参/返回由函数注解决定）
 
 
 # ===== 采集类工具（mcp_collect_server :8004）=====
+# 每个 ToolDefinition 的三要素：name=客户端调用名，description=给 Agent 的调用说明，
+# handler=真正的实现函数。这里只是「登记」，不执行任何逻辑。
 COLLECT_TOOLS: List[ToolDefinition] = [
     ToolDefinition(
         name="collect_news",
@@ -83,9 +110,19 @@ VIDEO_TOOLS: List[ToolDefinition] = [
 def register_to(server, tool_defs: List[ToolDefinition]) -> None:
     """把一组工具定义注册到 FastMCP 服务器对象上。
 
-    Args:
-        server: FastMCP 实例（mcp.server.fastmcp.FastMCP）。
-        tool_defs: 要注册的工具定义列表（COLLECT_TOOLS / PROCESS_TOOLS / PUBLISH_TOOLS）。
+    参数:
+        server:   FastMCP 实例（来自 mcp.server.fastmcp.FastMCP）。
+        tool_defs: 要注册的工具定义列表（COLLECT_TOOLS / PROCESS_TOOLS / PUBLISH_TOOLS / VIDEO_TOOLS）。
+
+    返回:
+        None（原地修改 server，注册后 MCP 客户端即可发现并调用这些工具）。
+
+    说明:
+        ``server.tool(name=..., description=...)`` 是 FastMCP 的注册装饰器工厂：
+        先调用它得到一个装饰器，再把 ``td.handler`` 传进去完成注册。
+        工具函数本身保持 MCP 无关，因此同一函数也能被流水线 / 前端直接调用。
     """
+    # 遍历工具定义列表，逐个注册到 FastMCP 服务器上。
     for td in tool_defs:
+        # server.tool(...) 返回装饰器，立刻用 td.handler 调用它完成注册。
         server.tool(name=td.name, description=td.description)(td.handler)

@@ -1,0 +1,827 @@
+HotnewsFeed 全项目代码级实现详解
+=================================
+
+说明
+----
+这份文档不是只说“某个文件负责什么”，而是从当前源码最底层开始，逐个解释：
+1. 类或函数的完整签名；
+2. 每个参数是什么、默认值是什么；
+3. 返回什么 Python 类型、内部字段是什么；
+4. 函数内部按什么顺序执行；
+5. 调用了哪个下一层函数；
+6. 成功、空结果和异常时分别返回什么；
+7. 该返回值怎样被上层继续使用。
+
+阅读顺序严格按“底层数据和工具 → 存储 → 协议 → Agent → 调度 → main 入口”展开。
+
+
+第一层：配置、日志和公共数据对象
+================================
+
+一、config.py：所有模块读取 config.ini 的唯一入口
+-------------------------------------------------
+
+模块常量：PROJECT_ROOT
+  值：Path(__file__).resolve().parent。
+  含义：config.py 所在的 HotnewsFeed 绝对目录。日志、输出目录、Cookie 和临时目录的相对路径最终都基于它转换成绝对路径。
+
+函数：_clean(value)
+  参数：value 是 configparser 读取到的 str 或 None。
+  返回：str。
+  内部逻辑：None 返回空字符串；否则 strip 去空白，再去掉两侧单/双引号。
+
+类：Config
+  __init__(self, config_path=None)
+    config_path 不传时使用 PROJECT_ROOT/config.ini。创建 self._parser 并用 UTF-8 读取；读取失败抛 FileNotFoundError。
+
+  get(self, section, key, default=None)
+    section/key 指定配置项。返回 _clean 后的字符串；节或键不存在返回 default。
+
+  属性 llm
+    返回 dict：base_url、api_key、model_name，来源 [llm]。
+
+  属性 mysql
+    返回可传给 pymysql.connect 的 dict：host、port(int，默认3306)、user、password、database、charset(默认utf8mb4)。
+
+  属性 redis
+    返回 host、port、password、db、key_prefix、cache_ttl_seconds；空密码转 None，数值转 int。
+
+  属性 milvus
+    返回 uri、database_name、collection_name、dimension(int，默认1024)。
+
+  属性 offline_news
+    返回 modules 列表、per_module_limit、retention_days、query_top_k、schedule_hour/minute、fetch_article_content、article_concurrency、daily_briefing_enabled、daily_briefing_top_n、daily_briefing_channels。query_top_k 被 min(3,配置值) 强制上限3；多个 true/yes/on 字符串转换成 bool。
+
+  属性 temperature
+    返回 float，默认0.1。
+
+  属性 log_file
+    返回绝对路径 str。普通相对路径拼到 PROJECT_ROOT；类似 os.path.join(...) 的表达式占位会回退 PROJECT_ROOT/logs/app.log。
+
+  _section_items(self, section)
+    返回该节全部清洗后键值 dict；节不存在返回 {}。
+
+  属性 embedding_model
+    返回 [embedding].model_name，默认 text-embedding-v3。
+
+  属性 publish
+    返回飞书/Webhook/SMTP/output_dir 配置；smtp_port 转 int；output_dir 转绝对路径。
+
+  属性 rss_sources
+    返回 Dict[str,List[str]]；每个模块配置值按逗号拆 URL。
+
+  属性 accounts
+    返回 [accounts] 的账户到抓取地址映射。
+
+  属性 account_monitor
+    返回 interval_minutes、latest_limit、notify_on_first_run、process_video_content、notify_channels、bilibili_cookie、cookie_file、asr_model、temp_dir。Cookie和临时目录相对路径转绝对路径。
+
+直接运行 config.py：只做配置自测，不打印 api_key。
+
+
+二、create_logger.py：统一双通道日志
+----------------------------------
+
+setup_logger(name, log_file=None) -> logging.Logger
+  name 是日志器名；log_file 不传则 Config().log_file。
+  内部依次创建目录、getLogger、总级别 DEBUG、propagate=False、创建格式器、INFO控制台Handler、DEBUG UTF-8追加文件Handler。只有 logger.handlers 为空才挂载，防止重复输出。模块最后创建全局 logger=setup_logger('HotnewsFeed')。
+
+
+三、task_pipelines/schemas.py：跨层数据契约
+-----------------------------------------
+
+HotEvent dataclass
+  必填：event_id、module、title、heat_score、credibility、sources。
+  可选：article_count=0、first_seen_at=""、latest_at=""、summary=""。
+
+NewsItem dataclass
+  必填：news_id、module、title、source、published_at、url；summary=""。
+
+AccountPost dataclass
+  必填：post_id、account、platform；title/content/published_at/url 默认空。
+
+PipelineResult dataclass
+  必填：task_type、items；queried_at=""、elapsed_ms=0、error=None。
+
+dto_from_dict(cls, d)
+  d 已是 cls 实例则原样返回；否则只保留 cls.__dataclass_fields__ 中存在的键后 cls(**dict)。多余字段会忽略，但缺少无默认值的必填字段仍会 TypeError，并非真正“自动补齐全部字段”。
+
+no_real_items(items) -> bool
+  空列表或全部 title 以【模拟】开头时 True，否则 False。
+
+
+第二层：在线新闻采集工具
+========================
+
+四、tools/collect.py：RSS、HN、搜索源和账户发布
+-----------------------------------------------
+
+DEFAULT_RSS_FEEDS 保存板块源；DEFAULT_SOURCES=[rss,hn]；MODULE_TERMS 用于综合来源模块过滤；KEYWORD_ALIASES 将足球扩展为 football/soccer/英超等；SOURCE_HANDLERS 将来源名映射到异步函数。
+
+_now_iso() -> str
+  返回本地当前时间 YYYY-MM-DDTHH:MM:SS。
+
+_clean_text(value) -> str
+  None→""，非str先str；移除BOM；非法Unicode用U+FFFD替换，避免MCP UTF-8序列化失败。
+
+_fetch(url: str, timeout: int=10) -> bytes
+  创建带浏览器UA的 urllib Request，urlopen 后 read。网络异常向调用者抛。
+
+_parse_date(value: Optional[str]) -> str
+  先按RFC822解析，再按ISO前19位解析；成功返回ISO秒级时间，失败空字符串。
+
+_local_name(tag: str) -> str
+  去掉 XML {namespace} 前缀。
+
+_first_field(fields: dict, *names)
+  返回首个不为None的XML Element，否则None。
+
+_expand_terms(terms: Optional[List[str]]) -> List[str]
+  同义词展开、小写、保持顺序去重。
+
+_matches(item: NewsItem, terms: List[str]) -> bool
+  title+summary 转小写，包含任一term即True。
+
+_is_general_source(item: NewsItem) -> bool
+  source 属于综合Feed或 Hacker/Google/Bing News 时True，需要模块过滤。
+
+_parse_feed(xml_bytes, module, source) -> List[NewsItem]
+  ElementTree解析RSS2/Atom；找channel/item或feed/entry；取标题、link、摘要、时间；空标题丢弃；摘要截200字；url或标题做MD5前8位生成rss-ID；未知时间保持空；返回NewsItem列表。非法XML向上抛。
+
+async _fetch_rss(module, since, limit) -> List[NewsItem]
+  配置源优先，否则默认源。普通URL在线程抓取并解析；search:前缀调用关键词搜索。逐源串行处理，单源失败只warning。since在本函数不使用，由collect_news统一过滤。
+
+async _fetch_hn(module, since, limit) -> List[NewsItem]
+  抓topstories IDs并截limit；每个ID用gather并发抓JSON；仅保留story和有标题项；构造hn-ID、时间、URL和得分摘要。单条失败跳过。
+
+async _fetch_news_search(keywords, limit, module) -> List[NewsItem]
+  关键词空格拼接并URL编码；先Google News RSS，失败/空再Bing；Google标题剥来源后缀；首个成功源返回前limit；全失败返回[]。
+
+_mock_news(module,count=3) -> List[NewsItem]
+  创建标题带【模拟】的演示数据，只用于所有真实来源原始结果为0。
+
+async _fetch_sources(module,since,limit,sources) -> List[NewsItem]
+  为已知source创建handler协程，gather(return_exceptions=True)并发；未知源和异常源跳过；成功结果展平。
+
+async collect_news(module, keywords=None, sources=None, since=None, limit=50) -> List[NewsItem]
+  1. sources为空用rss+hn；
+  2. 并发抓各来源；
+  3. 有keywords时额外用keywords直接搜Google/Bing，补充窄主题召回；
+  4. 保存raw_count；
+  5. since可解析时删除无时间或早于下限项；非法since忽略；
+  6. 有keywords时扩同义词并严格过滤；无keywords时只对综合来源按MODULE_TERMS过滤，专用RSS保留；
+  7. published_at倒序；标题移除非单词字符、转小写、截40位做去重指纹；
+  8. 截limit；
+  9. 结果空且raw_count=0才返回模拟；raw_count>0但不相关则如实返回[]。
+
+_resolve_account_feed(account, platform) -> Optional[str]
+  去@后查conf.accounts，再查原account；account本身是HTTP URL则返回；否则None。platform当前未用于映射。
+
+_mock_posts(account,platform,count=3) -> List[AccountPost]
+  返回缺配置时的模拟发布。
+
+async fetch_account_posts(account,platform,since=None,limit=50) -> List[AccountPost]
+  解析真实地址；没有则模拟。B站平台委托fetch_bilibili_space_videos。其它平台把地址当RSS，NewsItem转AccountPost，post-ID为标题/url MD5前8位。普通RSS异常返回模拟；B站分支在try之前，异常会真实抛出供监控层记录。
+
+
+第三层：B站和视频内容
+====================
+
+五、tools/bilibili.py
+--------------------
+
+extract_space_uid(value: str) -> str
+  纯数字原样返回；否则正则提取space.bilibili.com/UID；失败ValueError。
+
+_ydl_options(limit: int) -> dict
+  返回yt_dlp静默、extract_flat、playlistend、skip_download、Referer、禁系统代理、20秒超时、2次重试配置。bilibili_cookie放Header；cookie_file先验证存在再设置，否则FileNotFoundError。
+
+async fetch_bilibili_space_videos(account,space_url,since=None,limit=20) -> List[AccountPost]
+  解析UID并规范化URL；内部extract闭包在线程执行yt_dlp.extract_info(download=False)。异常包装RuntimeError并提示Cookie。since转timestamp cutoff；遍历entries，过滤旧时间；提取bvid/title/description/url/UTC时间，构造AccountPost并返回前limit。这里只取列表和简介，不提取字幕。
+
+
+六、tools/video.py
+-----------------
+
+VideoContent dataclass
+  video_id/title/author/published_at/transcript/summary必填；keywords=[]、source_url=""、content_source="metadata"。
+
+_ydl_options(download=False,output="") -> dict
+  返回完整视频元数据/下载配置，含Cookie、禁系统代理、超时重试；output非空设置outtmpl。
+
+_pick_subtitle(info: dict) -> dict
+  在subtitles和automatic_captions中按zh-CN、zh-Hans、zh、ai-zh、danmaku优先，取候选最后一条；无中文取任意轨道；没有返回{}。
+
+_subtitle_text(track: dict) -> str
+  规范化//URL，抓UTF-8文本。支持B站JSON body[].content、events[].segs[].utf8，以及VTT/SRT文本；后者过滤时间轴/编号/WEBVTT/NOTE并去HTML标签。
+
+_download_wav(video_url,directory) -> str
+  imageio_ffmpeg定位ffmpeg；yt_dlp下载bestaudio；后处理为16000Hz单声道WAV；目录找第一份.wav，无文件RuntimeError。
+
+_transcribe(wav_path) -> str
+  设置dashscope.api_key；Recognition使用配置模型、wav、16000；状态非200抛错；get_sentence统一成list；拼接text/sentence。
+
+_summarize(title,transcript,description) -> tuple[str,List[str]]
+  内容优先transcript>description>title；全部空返回("",[])。ChatOpenAI要求严格summary/keywords JSON，只发送前12000字。解析失败返回原响应前500字和空关键词。
+
+async extract_video_content(video_url,platform="bilibili",prefer_subtitle=True) -> VideoContent
+  检查平台；在线程yt_dlp取元数据；优先选字幕并解析；无字幕创建临时目录下载音频+ASR，失败只warning；调用LLM摘要；转UTC发布时间；返回VideoContent。transcript是完整字幕/ASR文本，summary才是精简内容。
+
+
+第四层：加工和输出
+==================
+
+七、tools/process.py
+-------------------
+
+EventCluster dataclass
+  必填cluster_id/title/member_ids/centroid；可选created_at/module/sources/first_seen_at/latest_at。
+
+_embed_texts(texts) -> Optional[List[List[float]]]
+  OpenAI兼容embeddings.create；按index排序。异常返回None触发TF降级。
+
+_normalize(text) -> str：压缩空白。
+
+_tokenize(text) -> set：英文数字单词+单个中文字符+相邻中文二元组。
+
+_tf_vectors(texts) -> List[List[float]]
+  全批次共享词表，生成词频向量并L2归一化。
+
+_cosine(a,b) -> float
+  空、维度不同或零向量返回0；否则点积除范数。
+
+_merge_uniq(lst,values) -> List[str]
+  副本中追加非空不重复值。
+
+async cluster_events(news_items,threshold=0.8) -> List[EventCluster]
+  空输入[]。标题+摘要向量化；失败TF。单遍扫描每条新闻，与全部簇质心求余弦；最佳值达阈值则并入并更新ID、来源、均值质心、最长代表标题和时间范围，否则创建evt-UUID前8位新簇。
+
+_heat_score(cluster,time_window_hours) -> float
+  30基础 + min(成员,30)*1.5 + min(来源,8)*4 + 时效奖励(1h/6h/24h/72h分别20/12/6/2)，封顶100。time_window_hours本身不缩放公式。
+
+async score_heat(clusters,time_window_hours=24) -> List[HotEvent]
+  最新时间超窗的簇跳过；时间未知保留。转换HotEvent，credibility先设待核验，按分数倒序。
+
+_heuristic_credibility(event) -> str
+  文章>=3且来源>=3→可信；文章>=2→存疑；否则证据不足。
+
+async verify_events(events) -> List[HotEvent]
+  空列表原样。事件核心字段转JSON，verify_prompt|llm在线程调用；解析event_id到credibility。失败使用启发式。原地修改每个event.credibility并返回。
+
+
+八、tools/publish.py
+-------------------
+
+PublishResult dataclass：briefing_id、channels必填，error=""。
+
+_format_markdown(task_result) -> str
+  生成标题、任务类型、时间和条目；按HotEvent/NewsItem/AccountPost字段分支；空结果写提示。
+
+_generate_briefing(task_result) -> str
+  task_type和items.__dict__转JSON，briefing_prompt|llm；异常/空结果降级_format_markdown。
+
+_push_feishu(webhook,text) -> None：POST飞书文本JSON。
+
+_push_webhook(url,text) -> None：POST {text:...}。
+
+_push_email(cfg,text) -> None：UTF-8 MIMEText；465用SMTP_SSL，否则SMTP；login/send；finally quit。
+
+_write_local(output_dir,briefing_id,text) -> str：创建目录，写briefing-ID.md，返回路径。
+
+async publish_briefing(task_result,channels=None,template="default") -> PublishResult
+  非default模板仅warning；微秒时间生成ID；空channels使用四通道；线程生成正文。内部_run(name,fn)在线程推送并记录bool/error。缺配置通道直接False；已配置任务gather并发；返回PublishResult。
+
+
+第五层：数据库和持久状态
+========================
+
+九、offline_news/stores.py
+-------------------------
+
+normalize_query(query) -> str
+  小写、strip、合并空白，用于Redis“完全相同查询”。
+
+MySQLNewsStore._ensure_database() -> None
+  复制MySQL配置并弹出database；只允许字母数字下划线；连接服务创建库。
+
+MySQLNewsStore._connect()
+  返回pymysql DictCursor事务连接。
+
+MySQLNewsStore.init_schema() -> None
+  建库和offline_news表；news_uid唯一，content MEDIUMTEXT，expires_at索引。
+
+MySQLNewsStore._mysql_time(value) -> Optional[datetime]
+  ISO/Z转无时区datetime；非法None。
+
+MySQLNewsStore.upsert(rows,retention_days) -> List[Dict]
+  rows物化成list；空返回[]。expires_at=发布时间或当前时间+天数；executemany，UID冲突更新；按UID查回id及索引字段，commit并返回。
+
+expired_ids() -> List[int]：返回已过期ID。
+active_for_index() -> List[Dict]：返回未过期的向量索引字段。
+delete_expired() -> int：删除过期行并返回数量。
+
+fetch_by_ids(ids,limit=3) -> List[Dict]
+  空ID[]；截limit；查未过期原文；按输入ID重新排序；datetime转ISO。
+
+fetch_today_by_module(module,limit=10) -> List[Dict]
+  查询当日抓取、未过期、指定模块，按发布时间/抓取时间倒序。
+
+RedisQueryCache.__init__：保存conf.redis。
+_client()：返回decode_responses、2秒超时Redis客户端。
+_key(query) -> str：标准化查询SHA256，组成prefix:query:digest。
+get(query) -> Optional[List[Dict]]：命中JSON解析；无键或异常None。
+set(query,rows) -> None：setex TTL JSON；异常只warning。
+clear_queries() -> None：scan_iter并批量删除query键。
+
+MilvusNewsIndex.__init__：self.cfg，self.client=None。
+connect()：懒连接；创建数据库和COSINE集合，int主键、指定维度、auto_id=False。
+embed(texts) -> List[List[float]]：空[]；每10条调用embedding并按index合并。
+upsert(rows) -> None：拼module/title/summary/content前1500字；向量化；以MySQL id写Milvus。
+search_ids(query,limit=3) -> List[int]：query向量；COSINE检索，最多3；返回ID。
+delete(ids) -> None：非空时删除向量。
+
+
+十、account_monitor/store.py
+---------------------------
+
+AccountMonitorStore._connect()：pymysql DictCursor事务连接。
+
+init_schema() -> None
+  创建monitored_accounts和account_posts；前者account+platform唯一；后者platform+post_id唯一，分别存content、transcript、summary、keywords、content_source、URL、时间和notified。
+
+delete_mock_posts() -> int：删除mock-ID/模拟标题并返回数量。
+register(account,platform,url) -> None：插入；重复时更新URL并重新enabled。
+enabled_accounts() -> List[Dict]：返回启用任务。
+disable(account,platform) -> bool：只停用，历史保留。
+has_history(account,platform) -> bool：SELECT 1判断是否有基线。
+
+existing_ids(platform,post_ids) -> set
+  清洗ID，动态IN查询，返回已有集合；空输入set()。
+
+_time(value) -> Optional[datetime]：ISO/Z转无时区时间。
+
+save_posts(rows,notified=False) -> None
+  空返回。keywords列表逗号拼接；executemany upsert；重复时更新内容；published_at空值不覆盖旧值；notified用GREATEST保证True不回退。
+
+finish_check(account,platform,error="") -> None
+  更新NOW和last_error，空错误写NULL。
+
+status() -> List[Dict]
+  左连接发布并COUNT，返回账户、URL、检查时间、错误、post_count。
+
+
+第六层：离线与监控业务服务
+==========================
+
+十一、offline_news/crawler.py
+----------------------------
+
+CrawledNews dataclass：news_uid/module/title/source/url/summary/content必填，published_at=""。
+to_dict(self) -> Dict：dataclasses.asdict。
+
+_ArticleParser.__init__：depth=0、parts=[]。
+handle_starttag(tag,attrs)：进入article/main时depth+1；正文内p追加换行。
+handle_endtag(tag)：离开article/main时depth-1。
+handle_data(data)：仅depth>0，压缩空白后追加。
+text() -> str：拼接parts并压重复空行。
+
+_fetch_article(url) -> str
+  空URL空串；带UA抓取，按响应charset解码，HTMLParser提正文，截20000；异常debug并空串。
+
+async crawl_module(module,limit) -> List[CrawledNews]
+  cutoff=当前-保留天数；只采RSS且since=cutoff；去模拟。Semaphore限制正文并发。内部convert可抓正文；UID对URL或模块标题来源SHA256；content优先正文>摘要>标题；gather转换。
+
+async crawl_all_modules() -> List[CrawledNews]
+  对配置模块gather(return_exceptions=True)；失败板块跳过；按news_uid字典去重。
+
+
+十二、offline_news/service.py
+----------------------------
+
+OfflineNewsService.__init__
+  创建mysql/redis/milvus对象和_initialized=False。
+
+initialize() -> None
+  MySQL建表、Milvus连接建集合、置True。
+
+async ingest() -> Dict[str,object]
+  initialize→crawl_all_modules→MySQL upsert→查过期ID先删Milvus→删MySQL→active_for_index全量重建/补齐向量→清Redis→可选每日简报。返回crawled/indexed/deleted/elapsed_ms/briefings。stored变量当前未参与返回。
+
+query(query,limit=3) -> Dict
+  limit限1..3；Redis命中返回source=redis。未命中确保初始化，Milvus取ID，MySQL取原文，Redis缓存，返回source=milvus+mysql。
+
+
+十三、offline_news/briefing.py
+-----------------------------
+
+async generate_daily_briefings() -> Dict[str,dict]
+  遍历模块；MySQL取今日topN；空则skipped。行转NewsItem，摘要不足用content前300字；包装offline_daily_模块 PipelineResult；调用publish网关。单板块异常不会影响其它板块。
+
+
+十四、account_monitor/service.py
+------------------------------
+
+AccountMonitorService.__init__：self.store=AccountMonitorStore。
+
+initialize() -> None
+  建表、删除模拟发布；conf.accounts每项判断bilibili或rss并注册。
+
+async _extract_video(url) -> VideoContent
+  优先把A2A delegate(video,extract_video_content)放线程；解析{ok,result,error}并dto_from_dict。失败直接await视频MCP网关。
+
+register_account(account,platform,url) -> Dict
+  空账户/URL ValueError；建表注册；返回规范化字段和registered=True。
+
+stop_account(account,platform) -> Dict
+  建表disable，返回stopped。
+
+async check_account(account,platform,limit=None,source_url="") -> Dict
+  limit默认配置；first_run=无历史；fetch_key优先source_url；MCP拉发布并恢复account名；发现模拟数据直接抛错拒绝入库；existing_ids去重；enrich=process_video_content且(非首次或允许首轮通知)。每行asdict并补视频字段；可增强时提字幕/ASR/摘要。should_notify成立时先存未通知，再构造AccountPost简报通知，最后存notified=True。成功finish_check并返回fetched/new/first_run/notified/publish；异常写last_error并返回error dict。
+
+async check_all() -> Dict[str,Dict]
+  initialize；顺序遍历启用账户并check_account；结果以account为键，同名不同平台会覆盖。
+
+status() -> List[Dict]
+  initialize后返回store.status。
+
+
+第七层：MCP注册、服务和客户端
+============================
+
+十五、tools/registry.py
+----------------------
+
+ToolDefinition dataclass：name、description、handler。
+COLLECT_TOOLS注册collect_news/fetch_account_posts；PROCESS_TOOLS注册cluster_events/score_heat/verify_events；PUBLISH_TOOLS注册publish_briefing；VIDEO_TOOLS注册extract_video_content。
+
+register_to(server,tool_defs) -> None
+  对每项执行server.tool(name=...,description=...)(handler)。FastMCP据handler注解生成Schema。
+
+
+十六、MCP Server
+----------------
+
+mcp_collect_server.py：导入即创建NewsCollect :8004并注册2工具；create_collect_mcp_server()无参数，run(streamable-http)阻塞，异常打印。
+mcp_process_server.py：NewsProcess :8005，3工具；create_process_mcp_server()。
+mcp_publish_server.py：NewsPublish :8006，1工具；create_publish_mcp_server()。
+mcp_video_server.py：VideoContent :8007，1工具；create_video_mcp_server()，run异常不捕获。
+mcp_servers/__init__.py只有说明，不导出ALL_SERVERS。
+
+
+十七、mcp_servers/mcp_access.py
+------------------------------
+
+_no_proxy_http_client(headers=None,timeout=None,auth=None) -> httpx.AsyncClient
+  trust_env=False、http1=True，避免Windows系统代理劫持localhost。
+
+MCP_URLS：collect/process/publish/video映射8004/8005/8006/8007的/mcp。
+
+sync_call(coro) -> Any
+  无运行事件循环时asyncio.run；已有循环时创建共享box字典，再启动新daemon线程。内部闭包_runner()无参数，在子线程里执行box["result"]=asyncio.run(coro)；主线程join等待后返回box["result"]。当前_runner没有捕获并保存子线程异常，因此协程在子线程抛错时，调用方可能最终看到KeyError('result')而不是原始异常。
+
+async mcp_call_tool(server,tool_name,arguments,timeout=30) -> Any
+  URL查表→streamablehttp_client→ClientSession→initialize→call_tool；isError抛RuntimeError；收集TextContent.text；_parse_payload还原。
+
+async mcp_list_tools(server,timeout=30) -> List[str]
+  同样建会话，list_tools后返回名称。
+
+async mcp_agent_call(query,server="collect",system=None,verbose=False) -> str
+  load_mcp_tools把会话工具转LangChain工具；创建提示、tool-calling agent和AgentExecutor；ainvoke后返回response[output]。主确定性链目前不使用它自主选工具。
+
+_parse_payload(texts) -> Any
+  先整体JSON解析；失败逐块解析，兼容FastMCP将List[DTO]拆多块；非JSON保留文本。
+
+_rows(raw) -> List[dict]
+  支持裸dict、result包装、list和嵌套list；展平并只留dict。
+
+业务网关：
+  async collect_news(...) -> List[NewsItem]
+  async fetch_account_posts(...) -> List[AccountPost]
+  async cluster_events(...) -> List[EventCluster]
+  async score_heat(...) -> List[HotEvent]
+  async verify_events(...) -> List[HotEvent]
+  async publish_briefing(...) -> PublishResult
+  async extract_video_content(...) -> VideoContent
+共同模式：dataclass用asdict转JSON参数→远程mcp_call_tool→_rows/dto_from_dict还原；任意异常warning并直接await tools.*。视频超时300秒。
+
+
+第八层：A2A协议和功能Agent
+=========================
+
+十八、a2a/protocol.py
+--------------------
+
+send_task(task_type,params=None,from_agent="?") -> Message
+  USER角色；content为task:类型；metadata.custom_fields保存路由数据。
+
+parse_task(message) -> Tuple[str,dict,str]
+  从metadata取task_type/params/from_agent，缺省text/{}/?。
+
+reply_text(text,parent_message_id=None,conversation_id=None) -> Message
+  返回AGENT角色TextContent并关联父消息、会话。
+
+_json_default(obj)：dataclass→asdict，其它→str。
+encode_result(ok,result,error=None) -> str：返回中文不转义的{ok,result,error} JSON。
+
+_get_client(name)
+  懒建全局AgentNetwork；按_AGENT_ENDPOINTS add并返回客户端。
+
+_http_delegate(agent_name,task_type,params=None,from_agent="?") -> str
+  创建UUID Task，message=send_task.to_dict；asyncio.run(send_task_async)。COMPLETED时从artifacts parts取text；连接失败转“启动子Agent”RuntimeError；其它失败返回ok=false JSON。
+
+delegate(target,task_type,params=None,from_agent="?") -> str
+  target为str走HTTP；A2AServer实例直接handle_message；None返回错误JSON。
+
+ask_user_confirm(prompt) -> bool
+  终端input；仅y/yes/是为True；EOF视为False。
+
+a2a/__init__.py重新导出上述公共函数。
+
+
+十九、CollectorAgent
+-------------------
+
+__init__：super绑定AgentCard，self.llm=模块LLM。
+collect_news(module,keywords=None,sources=None,since=None,limit=50) -> List[NewsItem]：sync_call MCP采集网关。
+fetch_account_posts(account,platform,since=None,limit=50) -> List[AccountPost]：sync_call账户网关。
+handle_message(message) -> Message：parse_task；按两个task_type从params取参数；异常ok=false；encode_result+reply_text。
+create_collector_agent() -> CollectorAgent；直接运行run_server :8001。
+
+
+二十、ProcessorAgent
+-------------------
+
+__init__绑定卡片。
+cluster_events(news_items,threshold=0.8) -> List[EventCluster]：sync_call加工网关。
+score_heat(clusters,time_window_hours=24) -> List[HotEvent]。
+verify_events(events) -> List[HotEvent]。
+handle_message按三个task_type路由并统一编码。
+create_processor_agent()；直接运行 :8002。
+
+
+二十一、PublisherAgent
+---------------------
+
+__init__绑定卡片。
+optimize_output(result) -> PipelineResult：当前仅日志并原样返回。
+publish_briefing(result,channels=None,template="default") -> PublishResult：Agent层空channels默认feishu+web_ui，sync_call输出网关。
+handle_message支持optimize/briefing。
+create_publisher_agent()；运行 :8003。
+
+
+二十二、VideoAgent
+-----------------
+
+__init__绑定卡片。
+extract(video_url,platform="bilibili",prefer_subtitle=True) -> VideoContent：sync_call视频MCP网关。
+handle_message仅支持extract_video_content，统一编码。
+create_video_agent()；运行A2A :8008。视频MCP在8007。
+
+
+二十三、AccountMonitorAgent
+--------------------------
+
+__init__绑定卡片并创建AccountMonitorService。
+register_monitor(account,platform,url,check_now=True) -> dict：注册；check_now则sync_call立即检查并放checked。
+handle_message支持register_monitor/check_monitors/monitor_status/stop_monitor；统一编码。
+create_account_monitor_agent()；运行 :8009。
+
+
+二十四、intent_agent.py
+----------------------
+
+intent_agent(user_input) -> (intents,user_queries,follow_up_message)
+  intent_prompt|llm；填当前日期、conversation_history最后6行、query；invoke；去Markdown JSON围栏；json.loads并get三字段。conversation_history当前始终空，main未更新；LLM非JSON会抛错。
+
+
+二十五、agents/__init__.py
+------------------------
+
+__getattr__(name)
+  name在_LAZY时importlib导入对应子模块并返回类；否则AttributeError，避免一次性导入全部Agent。
+
+
+第九层：Coordinator和直选流水线
+===============================
+
+二十六、CoordinatorAgent
+------------------------
+
+_contains_word(text,word) -> bool
+  中文子串；英文数字用边界正则。
+
+__init__：只绑定卡片，不持有子Agent实例。
+
+route(intent) -> PipelineResult
+  调intent_agent；有follow_up立即返回；_guess_keyword；遍历intents调用对应run方法；全部未知默认热点。user_queries目前只记录日志，不参与参数抽取。
+
+_guess_module(intent) -> str
+  配置模块→内置模块→别名映射；默认科技。
+
+_guess_keyword(intent) -> Optional[str]
+  遍历别名，跳模块名和过短词，返回首个命中；未在别名表的长尾主题不会被提取。
+
+_guess_account(intent) -> tuple
+  @正则；默认@新京报；平台别名判断，默认weibo。
+
+_monitor_params(text) -> tuple
+  关键词判status/check/stop/register；正则URL并去尾括号；猜账户平台；B站URL无账户时用bilibili_UID。返回action/account/platform/url。
+
+_delegate(agent_name,task_type,params,dto_cls=None)
+  调真实A2A delegate；JSON解析；ok=false抛错；list结果可逐条dto_from_dict。
+
+run_hotspot(module,top_n=10,time_window_hours=24,keywords=None) -> PipelineResult
+  A2A collector.collect_news(limit=max(top_n*5,30))→processor.cluster_events→score_heat→verify_events；DTO还原；截topN；记录UTC时间和耗时。
+
+run_latest(module,count=20,keywords=None) -> PipelineResult
+  A2A collector.collect_news；截count；包装latest_news。
+
+run_account_follow(account,platform,since=None,limit=20) -> PipelineResult
+  A2A collector.fetch_account_posts；包装account_follow。
+
+run_account_monitor_from_text(text) -> PipelineResult
+  抽action并映射下游task；注册无URL返回追问；A2A到account_monitor；dict包成items列表。
+
+handoff_briefing(result) -> bool
+  终端确认；同意A2A给publisher.briefing并返回ok；异常吞掉返回False。
+
+handle_message(message) -> Message
+  允许外部A2A调用四类任务；统一encode_result/reply_text。
+
+create_coordinator_agent() -> CoordinatorAgent。
+
+
+二十七、task_pipelines直选入口
+-----------------------------
+
+latest_news_pipeline.run(module,count=20,keywords=None) -> PipelineResult
+  await collect_news，截count，记录UTC时间/耗时。
+
+hotspot_query_pipeline.run(module,top_n=10,time_window_hours=24,keywords=None) -> PipelineResult
+  collect(limit放大)→cluster→score→verify→截topN。
+
+account_follow_pipeline.run(account,platform,since=None,limit=20) -> PipelineResult
+  fetch_account_posts→截limit→包装。
+
+task_pipelines/__init__.py为空，仅标包。自然语言主链不走这些流水线，它们留给前端直选。
+
+
+第十层：提示词、调度和入口
+========================
+
+二十八、HotnewsFeedPrompts
+-------------------------
+
+六个@staticmethod均返回ChatPromptTemplate：
+intent_prompt()占位current_date/conversation_history/query，规定四意图和严格JSON；
+summarize_hotspot_prompt()占位query/raw_response，当前未接生产链；
+summarize_latest_prompt()同上，未接；
+summarize_account_prompt()同上，未接；
+briefing_prompt()占位task_result，被publish使用；
+verify_prompt()占位events，被process使用。
+prompt/__init__.py仅标包。
+
+
+二十九、scheduler
+----------------
+
+offline_news_scheduler.run_ingest()：asyncio.run ingest。
+run_briefings()：只基于今日MySQL生成简报。
+main()：解析--init/--run-once/--briefing-only；否则BlockingScheduler cron每日配置时间执行，max_instances=1、coalesce=True。
+
+account_monitor_scheduler.run_check()：asyncio.run check_all。
+main()：--init建表；--run-once检查；否则interval分钟调度，防重入。
+scheduler/__init__.py仅标包。
+
+
+三十、offline_main.py
+--------------------
+
+format_rows(result) -> str
+  显示items数和source；逐条显示模块、标题、来源、时间、URL；摘要优先summary/content并截240。
+
+main()
+  UTF-8控制台；创建OfflineNewsService；循环输入；exit退出；查询后format_rows；异常单轮打印。
+
+
+三十一、main.py
+---------------
+
+format_result(result) -> str
+  None、follow_up、error分支；account_monitor字典转缩进JSON；其它调用_format_item。
+
+_format_item(idx,task_type,item) -> str
+  hotspot读取热度/可信度/来源/摘要；latest读取来源时间URL；其它按AccountPost字段。
+
+check_mcp_servers() -> Dict[str,dict]
+  遍历四URL，sync_call(mcp_list_tools,5秒)；成功ok/tools/url，失败error。
+
+_print_mcp_status(status) -> None：打印[OK]/[X]，不启动服务。
+
+run_task_result(agent,result) -> None
+  打印结果；仅热点/最新/一次账户且成功有items时反问简报，持续监控不反问。
+
+query_offline_news(query,limit=3) -> dict
+  空查询ValueError；limit限1..3；OfflineNewsService.query。
+
+run_offline_query(query,limit=3) -> None：查询并用offline_main格式化。
+
+_extract_offline_query(text) -> Optional[str]
+  只识别明确“从离线库查询/离线查询”前缀；删除前缀返回；普通问题None。
+
+handle_command(agent,cmd) -> bool
+  解析/help、/status、/hotspot、/latest、/account、/monitor add/run/status/stop、/offline；已识别True，未知False。
+
+main() -> None
+  UTF-8→打印帮助→探测MCP→创建Coordinator→while input“你>”→空跳过→exit退出→命令分支→离线分支→其余agent.route→run_task_result。每轮异常记录堆栈但循环继续。
+
+
+第十一层：测试和包文件
+====================
+
+tests/test_account_monitor.py
+  _FakeYDL.__init__保存options；__enter__返回自己；__exit__返回False；extract_info返回固定BV条目。
+  test_extract_uid验证UID；test_space_entries_to_posts用patch验证AccountPost；test_prefer_chinese_subtitle验证中文轨；test_video_agent_a2a_result替换extract验证A2A JSON；test_account_monitor_agent_status_a2a_result替换status验证下游A2A。
+
+tests/__init__.py、tools/__init__.py、task_pipelines/__init__.py、prompt/__init__.py、scheduler/__init__.py只标识包。
+offline_news/__init__.py导出OfflineNewsService；account_monitor/__init__.py导出AccountMonitorService；mcp_servers/__init__.py只有说明。
+
+
+第十二层：六条完整数据流
+========================
+
+1. 在线最新：main→Coordinator.route→intent_agent→槽位抽取→A2A Collector :8001→MCP网关→MCP :8004→tools.collect→NewsItem→A2A JSON→DTO→PipelineResult→format_result。
+
+2. 在线热点：采集后继续A2A Processor :8002，依次MCP聚类/热度/核验→HotEvent→topN。
+
+3. 一次账户：Coordinator→Collector→collect MCP→RSS或B站空间→AccountPost，只展示，不持久去重。
+
+4. 持续B站：main /monitor→Coordinator只分发→AccountMonitorAgent :8009→Service→collect MCP抓空间→MySQL去重→非首轮新视频→VideoAgent :8008→Video MCP :8007→字幕/ASR/摘要→MySQL→publish通知。
+
+5. 每日离线：06:00 scheduler→RSS→网页正文→MySQL upsert/三天过期→Milvus有效记录索引→Redis清缓存→分板块简报。
+
+6. 离线问答：main /offline→Redis精确键→未命中Milvus向量取最多3个MySQL ID→MySQL原文→写Redis→展示。
+
+
+当前源码真实边界
+================
+
+1. Coordinator的user_queries只记录日志，参数来自本地别名扫描。
+2. A2A子Agent未启动时Coordinator报错；MCP未启动时功能Agent会进程内降级tools.*。
+3. B站Cookie提供登录态，浏览器运行时无需打开；Cookie过期需重导。
+4. notify_on_first_run=false时首次基线不做视频转写，所以早期行可能仅URL/简介。
+5. transcript是完整文本，summary是精简文本，增强后的content写summary。
+6. 关键词零命中返回空，不拿无关新闻补数量。
+7. Redis是完全相同查询缓存；Milvus只存向量和MySQL ID；原文在MySQL。
+8. PublisherAgent.optimize_output和三个summarize提示模板尚未真正接入。
+
+
+文件覆盖清单（47个Python文件）
+=============================
+config.py
+create_logger.py
+main.py
+offline_main.py
+a2a/__init__.py
+a2a/protocol.py
+account_monitor/__init__.py
+account_monitor/service.py
+account_monitor/store.py
+agents/__init__.py
+agents/account_monitor_agent.py
+agents/collector_agent.py
+agents/coordinator_agent.py
+agents/intent_agent.py
+agents/processor_agent.py
+agents/publisher_agent.py
+agents/video_agent.py
+mcp_servers/__init__.py
+mcp_servers/mcp_access.py
+mcp_servers/mcp_collect_server.py
+mcp_servers/mcp_process_server.py
+mcp_servers/mcp_publish_server.py
+mcp_servers/mcp_video_server.py
+offline_news/__init__.py
+offline_news/briefing.py
+offline_news/crawler.py
+offline_news/service.py
+offline_news/stores.py
+prompt/__init__.py
+prompt/main_prompt.py
+scheduler/__init__.py
+scheduler/account_monitor_scheduler.py
+scheduler/offline_news_scheduler.py
+task_pipelines/__init__.py
+task_pipelines/account_follow_pipeline.py
+task_pipelines/hotspot_query_pipeline.py
+task_pipelines/latest_news_pipeline.py
+task_pipelines/schemas.py
+tests/__init__.py
+tests/test_account_monitor.py
+tools/__init__.py
+tools/bilibili.py
+tools/collect.py
+tools/process.py
+tools/publish.py
+tools/registry.py
+tools/video.py
